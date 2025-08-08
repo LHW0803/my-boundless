@@ -251,6 +251,18 @@ pub struct MarketConf {
     /// - "shortest_expiry": Process orders by shortest expiry first (lock expiry for lock-and-fulfill orders, request expiry for others)
     #[serde(default, alias = "expired_order_fulfillment_priority")]
     pub order_commitment_priority: OrderCommitmentPriority,
+    /// Mempool-only mode
+    ///
+    /// When enabled, only processes orders detected in mempool for maximum speed.
+    /// Disables blockchain event monitoring, order stream, and other non-critical services.
+    #[serde(default)]
+    pub mempool_only_mode: bool,
+    /// Offchain-only mode
+    ///
+    /// When enabled, only processes orders from the offchain order stream.
+    /// Disables blockchain event monitoring and mempool monitoring.
+    #[serde(default)]
+    pub offchain_only_mode: bool,
 }
 
 impl Default for MarketConf {
@@ -286,6 +298,8 @@ impl Default for MarketConf {
             max_concurrent_preflights: defaults::max_concurrent_preflights(),
             order_pricing_priority: OrderPricingPriority::default(),
             order_commitment_priority: OrderCommitmentPriority::default(),
+            mempool_only_mode: false,
+            offchain_only_mode: false,
         }
     }
 }

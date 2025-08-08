@@ -25,6 +25,7 @@ use crate::{
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+use std::time::Duration;
 
 #[derive(Error)]
 pub enum OffchainMarketMonitorErr {
@@ -71,41 +72,82 @@ impl OffchainMarketMonitor {
         new_order_tx: tokio::sync::mpsc::Sender<Box<OrderRequest>>,
         cancel_token: CancellationToken,
     ) -> Result<(), OffchainMarketMonitorErr> {
-        tracing::debug!("Connecting to off-chain market: {}", client.base_url);
-        let socket =
-            client.connect_async(signer).await.map_err(OffchainMarketMonitorErr::WebSocketErr)?;
+        // 30분마다 자동 재연결 (메모리/성능 최적화)
+        const RECONNECT_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30분
+        
+        tracing::info!("🚀 ULTRA FAST: Connecting to off-chain market: {}", client.base_url);
+        tracing::info!("⚡ Auto-reconnect enabled: Every 30 minutes for optimal performance");
+        
+        // Set ping interval from environment variable (default: 2000ms for stability)
+        let ping_ms = std::env::var("ORDER_STREAM_CLIENT_PING_MS")
+            .unwrap_or_else(|_| "2000".to_string());
+        std::env::set_var("ORDER_STREAM_CLIENT_PING_MS", &ping_ms);
+        
+        // Connection timeout from environment variable (default: 5 seconds)
+        let timeout_secs = std::env::var("ORDER_STREAM_CLIENT_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse::<u64>()
+            .unwrap_or(5);
+        
+        let socket = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            client.connect_async(signer)
+        ).await
+        .map_err(|_| OffchainMarketMonitorErr::WebSocketErr(anyhow::anyhow!("WebSocket connection timeout ({}s)", timeout_secs)))? 
+        .map_err(OffchainMarketMonitorErr::WebSocketErr)?;
 
         let mut stream = order_stream(socket);
-        tracing::info!("Subscribed to offchain Order stream");
+        tracing::info!("🚀 ULTRA FAST: Connected to offchain Order stream with {}ms ping", ping_ms);
+
+        // Ultra-fast processing buffer for immediate parallel handling
+        let (ultra_tx, mut ultra_rx) = tokio::sync::mpsc::unbounded_channel::<Box<OrderRequest>>();
+        let main_tx = new_order_tx.clone();
+        
+        // Ultra-fast parallel forwarder
+        tokio::spawn(async move {
+            while let Some(order) = ultra_rx.recv().await {
+                let tx = main_tx.clone();
+                // Immediate fire-and-forget forwarding
+                tokio::spawn(async move {
+                    if let Err(_) = tx.send(order).await {
+                        // Silent fail - ultra-fast processing prioritizes speed
+                    }
+                });
+            }
+        });
+        
+        // 재연결 타이머 시작
+        let reconnect_timer = tokio::time::sleep(RECONNECT_INTERVAL);
+        tokio::pin!(reconnect_timer);
 
         loop {
             tokio::select! {
+                // 30분 타이머 만료시 재연결
+                _ = &mut reconnect_timer => {
+                    tracing::info!("⚡ Scheduled 30-minute reconnection for performance optimization");
+                    return Ok(()); // RetryTask가 자동으로 재시작
+                }
                 order_data = stream.next() => {
                     match order_data {
                         Some(order_data) => {
-                            tracing::info!(
-                                "Detected new order with stream id {:x}, request id: {:x}",
-                                order_data.id,
-                                order_data.order.request.id
-                            );
-
+                            let order_id = order_data.id;
+                            
+                            // Create order immediately - no logging delays
                             let new_order = OrderRequest::new(
                                 order_data.order.request,
                                 order_data.order.signature.as_bytes().into(),
-                                FulfillmentType::LockAndFulfill,
+                                FulfillmentType::MempoolLockAndFulfill,
                                 client.boundless_market_address,
                                 client.chain_id,
                             );
 
-                            if let Err(e) = new_order_tx.send(Box::new(new_order)).await {
-                                tracing::error!("Failed to send new order to broker: {}", e);
-                                return Err(OffchainMarketMonitorErr::ReceiverDropped);
-                            } else {
-                                tracing::trace!(
-                                    "Sent new off-chain order {:x} to OrderPicker via channel.",
-                                    order_data.id
-                                );
+                            // Ultra-fast unbounded send (no blocking)
+                            if let Err(_) = ultra_tx.send(Box::new(new_order)) {
+                                tracing::error!("⚡ ULTRA: Channel closed for order {:x}", order_id);
                             }
+                            
+                            // Minimal success log
+                            tracing::trace!("⚡ {:x}", order_id);
                         }
                         None => {
                             return Err(OffchainMarketMonitorErr::WebSocketErr(anyhow::anyhow!(

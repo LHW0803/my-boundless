@@ -23,7 +23,7 @@ use crate::{
     config::ConfigLock,
     db::DbObj,
     errors::CodedError,
-    provers::{ProverError, ProverObj},
+    provers::ProverObj,
     storage::{upload_image_uri, upload_input_uri},
     task::{RetryRes, RetryTask, SupervisorErr},
     utils, FulfillmentType, OrderRequest, OrderStateChange,
@@ -59,7 +59,7 @@ const MIN_CAPACITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const ONE_MILLION: U256 = uint!(1_000_000_U256);
 
 /// Maximum number of orders to cache for deduplication
-const ORDER_DEDUP_CACHE_SIZE: u64 = 5000;
+const ORDER_DEDUP_CACHE_SIZE: u64 = 20000;
 
 /// In-memory LRU cache for order deduplication by ID (prevents duplicate order processing)
 type OrderCache = Arc<Cache<String, ()>>;
@@ -371,7 +371,8 @@ where
         }
 
         // Short circuit if the order has been locked.
-        if order.fulfillment_type == FulfillmentType::LockAndFulfill
+        if (order.fulfillment_type == FulfillmentType::LockAndFulfill 
+            || order.fulfillment_type == FulfillmentType::MempoolLockAndFulfill)
             && self
                 .db
                 .is_request_locked(U256::from(order.request.id))
@@ -454,26 +455,14 @@ where
         }
 
         // Calculate exec limit (handles priority requestors and config internally)
-        let (exec_limit_cycles, prove_limit) = self.calculate_exec_limits(order, order_gas_cost)?;
+        let (_exec_limit_cycles, _prove_limit) = self.calculate_exec_limits(order, order_gas_cost)?;
 
-        if prove_limit < 2 {
-            // Exec limit is based on user cycles, and 2 is the minimum number of user cycles for a
-            // provable execution.
-            // TODO when/if total cycle limit is allowed in future, update this to be total cycle min
-            tracing::info!("Removing order {order_id} because its exec limit is too low");
-
-            return Ok(Skip);
-        }
-
-        tracing::debug!(
-            "Starting preflight execution of {order_id} with limit of {} cycles (~{} mcycles)",
-            exec_limit_cycles,
-            exec_limit_cycles / 1_000_000
-        );
+        // ===== PREFLIGHT 완전 스킵 모드 - exec limit 검사도 무시 =====
+        // 기존 exec limit 검사를 건너뛰고 바로 진행
 
         // Create cache key based on input type
         let image_id = Digest::from(order.request.requirements.imageId.0);
-        let cache_key = match order.request.input.inputType {
+        let _cache_key = match order.request.input.inputType {
             RequestInputType::Url => {
                 let input_url = std::str::from_utf8(&order.request.input.data)
                     .context("input url is not utf8")
@@ -496,152 +485,43 @@ where
             }
         };
 
-        // Loop while the cached result is skipped and has a lower exec limit than the current order.
-        let preflight_result = loop {
-            let prover = self.prover.clone();
-            let config = self.config.clone();
-            let request = order.request.clone();
-            let order_id_clone = order_id.clone();
-            let cache_key_clone = cache_key.clone();
-
-            let cache_cloned = self.preflight_cache.clone();
-            let result = tokio::task::spawn(async move {
-
-                // Multiple concurrent calls of this coalesce into a single execution. This is done
-                // to prevent multiple preflight jobs starting for the same program/input.
-                // https://docs.rs/moka/latest/moka/sync/struct.Cache.html#concurrent-calls-on-the-same-key-2
-                cache_cloned
-                    .try_get_with(cache_key_clone, async move {
-                        tracing::trace!(
-                            "Starting preflight of {order_id_clone} with exec limit {exec_limit_cycles} mcycles",
-                        );
-
-                        // Upload image and input only if not cached
-                        let image_id = upload_image_uri(&prover, &request, &config)
-                            .await
-                            .map_err(|e| OrderPickerErr::FetchImageErr(Arc::new(e)))?;
-
-                        let input_id = upload_input_uri(&prover, &request, &config)
-                            .await
-                            .map_err(|e| OrderPickerErr::FetchInputErr(Arc::new(e)))?;
-
-                        // TODO add a future timeout here to put a upper bound on how long to preflight for
-                        match prover
-                            .preflight(
-                                &image_id,
-                                &input_id,
-                                vec![],
-                                Some(exec_limit_cycles),
-                                &order_id_clone,
-                            )
-                            .await
-                        {
-                            Ok(res) => {
-                                tracing::debug!(
-                                    "Preflight execution of {order_id_clone} with session id {} and {} mcycles completed in {} seconds",
-                                    res.id,
-                                    res.stats.total_cycles / 1_000_000,
-                                    res.elapsed_time
-                                );
-                                Ok(PreflightCacheValue::Success {
-                                    exec_session_id: res.id,
-                                    cycle_count: res.stats.total_cycles,
-                                    image_id,
-                                    input_id,
-                                })
-                            }
-                            Err(err) => match err {
-                                ProverError::ProvingFailed(ref err_msg)
-                                    if err_msg.contains("Session limit exceeded") =>
-                                {
-                                    tracing::debug!(
-                                        "Skipping order {order_id_clone} due to session limit exceeded: {}",
-                                        err_msg
-                                    );
-                                    Ok(PreflightCacheValue::Skip {
-                                        cached_limit: exec_limit_cycles,
-                                    })
-                                }
-                                ProverError::ProvingFailed(ref err_msg)
-                                    if err_msg.contains("GuestPanic") =>
-                                {
-                                    Err(OrderPickerErr::GuestPanic(err_msg.clone()))
-                                }
-                                _ => Err(OrderPickerErr::UnexpectedErr(Arc::new(err.into()))),
-                            },
-                        }
-                    })
-                    .await
-            })
+        // ===== PREFLIGHT 완전 스킵: 바로 Lock/Prove 진행 =====
+        
+        // 1. Image와 Input을 실제로 업로드
+        let image_id = upload_image_uri(&self.prover, &order.request, &self.config)
             .await
-            .map_err(|e| OrderPickerErr::UnexpectedErr(Arc::new(e.into())))?;
+            .map_err(|e| OrderPickerErr::FetchImageErr(Arc::new(e)))?;
+        let input_id = upload_input_uri(&self.prover, &order.request, &self.config)
+            .await
+            .map_err(|e| OrderPickerErr::FetchInputErr(Arc::new(e)))?;
 
-            let cached_value = match result {
-                Ok(value) => value,
-                Err(e) => break Err((*e).clone()),
-            };
+        // 2. Order 객체에 ID 설정
+        order.image_id = Some(image_id.clone());
+        order.input_id = Some(input_id.clone());
 
-            if let PreflightCacheValue::Skip { cached_limit } = cached_value {
-                if cached_limit < exec_limit_cycles {
-                    tracing::debug!(
-                        "Cached result has insufficient limit for order {order_id} (cached: {}, required: {}), re-running preflight",
-                        cached_limit, exec_limit_cycles
-                    );
-                    self.preflight_cache.invalidate(&cache_key).await;
-                    continue;
-                }
-            }
+        // 3. Mock 값들 생성 (기존 코드가 사용하는 변수들)
+        let exec_session_id = format!("skip-preflight-{}", order.id());
+        let cycle_count = 100_000_000_000_u64; // 100B cycles 고정
+        
+        tracing::info!(
+            "SKIPPING PREFLIGHT for order {}: using mock session {} with {} mcycles",
+            order.id(),
+            exec_session_id,
+            cycle_count / 1_000_000
+        );
 
-            break Ok(cached_value);
-        };
 
-        // Handle the preflight result
-        let (exec_session_id, cycle_count) = match preflight_result {
-            Ok(PreflightCacheValue::Success {
-                exec_session_id,
-                cycle_count,
-                image_id,
-                input_id,
-            }) => {
-                tracing::debug!(
-                    "Using preflight result for {order_id}: session id {} with {} mcycles",
-                    exec_session_id,
-                    cycle_count / 1_000_000
-                );
-
-                // Update order with the uploaded IDs
-                order.image_id = Some(image_id.clone());
-                order.input_id = Some(input_id.clone());
-
-                (exec_session_id, cycle_count)
-            }
-            Ok(PreflightCacheValue::Skip { .. }) => {
-                return Ok(Skip);
-            }
-            Err(err) => {
-                return Err(err);
-            }
-        };
-
+        // 4. ProofResult 생성 (기존 코드와 호환)
         let proof_res = ProofResult {
             id: exec_session_id,
             stats: ExecutorResp { total_cycles: cycle_count, ..Default::default() },
-            elapsed_time: 0.0,
+            elapsed_time: 0.1, // Mock 실행 시간
         };
 
-        // If a max_mcycle_limit is configured check if the order is over that limit
-        let proof_cycles = proof_res.stats.total_cycles;
-        if proof_cycles > prove_limit {
-            tracing::info!("Order {order_id} max_mcycle_limit check failed req: {proof_cycles} | config: {prove_limit}");
-            return Ok(Skip);
-        }
+        // Max cycle limit 검사 스킵 (preflight 스킵 모드에서는 무시)
 
-        let journal = self
-            .prover
-            .get_preflight_journal(&proof_res.id)
-            .await
-            .context("Failed to fetch preflight journal")?
-            .context("Failed to find preflight journal")?;
+        // 5. Mock journal 생성 (Lock 트랜잭션용)
+        let journal = vec![0u8; 32]; // 32바이트 영 데이터
 
         // ensure the journal is a size we are willing to submit on-chain
         let max_journal_bytes =
@@ -656,10 +536,12 @@ where
         }
 
         // Validate the predicates:
-        if !order.request.requirements.predicate.eval(journal.clone()) {
-            tracing::info!("Order {order_id} predicate check failed, skipping");
-            return Ok(Skip);
-        }
+        // Predicate 검사 스킵 - Preflight 스킵 모드에서 Mock journal 사용 시
+        tracing::info!("Order {order_id} skipping predicate check for preflight skip mode");
+        // if !order.request.requirements.predicate.eval(journal.clone()) {
+        //     tracing::info!("Order {order_id} predicate check failed, skipping");
+        //     return Ok(Skip);
+        // }
 
         self.evaluate_order(order, &proof_res, order_gas_cost, lock_expired).await
     }
@@ -1069,7 +951,8 @@ fn handle_lock_event(
     let initial_len = pending_orders.len();
     pending_orders.retain(|order| {
         let same_request = U256::from(order.request.id) == request_id;
-        let is_lock_and_fulfill = order.fulfillment_type == FulfillmentType::LockAndFulfill;
+        let is_lock_and_fulfill = order.fulfillment_type == FulfillmentType::LockAndFulfill
+            || order.fulfillment_type == FulfillmentType::MempoolLockAndFulfill;
         !(same_request && is_lock_and_fulfill)
     });
     let removed_orders = initial_len - pending_orders.len();

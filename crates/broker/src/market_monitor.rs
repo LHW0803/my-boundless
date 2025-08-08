@@ -210,9 +210,10 @@ where
                 continue;
             }
 
+            // 🚀 Apply fast track processing for all orders unless locked
             let fulfillment_type = match req_status {
                 RequestStatus::Locked => FulfillmentType::FulfillAfterLockExpire,
-                _ => FulfillmentType::LockAndFulfill,
+                _ => FulfillmentType::MempoolLockAndFulfill, // Fast track for blockchain orders too
             };
 
             tracing::info!(
@@ -523,10 +524,11 @@ where
             return Ok(()); // Return early without propagating the error if signature verification fails.
         }
 
+        // 🚀 Fast track processing for blockchain event orders
         let new_order = OrderRequest::new(
             event.request.clone(),
             event.clientSignature.clone(),
-            FulfillmentType::LockAndFulfill,
+            FulfillmentType::MempoolLockAndFulfill, // Fast track for blockchain events
             market_addr,
             chain_id,
         );

@@ -16,7 +16,7 @@ use crate::{
     config::{OrderCommitmentPriority, OrderPricingPriority},
     order_monitor::OrderMonitor,
     order_picker::OrderPicker,
-    OrderRequest,
+    OrderRequest, FulfillmentType,
 };
 
 use rand::seq::SliceRandom;
@@ -50,6 +50,33 @@ impl From<OrderCommitmentPriority> for UnifiedPriorityMode {
 }
 
 fn sort_orders_by_priority_and_mode<T>(
+    orders: &mut Vec<T>,
+    priority_addresses: Option<&[alloy::primitives::Address]>,
+    mode: UnifiedPriorityMode,
+) where
+    T: AsRef<OrderRequest>,
+{
+    // FIRST: Separate by fulfillment type - mempool orders get highest priority
+    let (mut mempool_orders, mut regular_orders): (Vec<T>, Vec<T>) = orders
+        .drain(..)
+        .partition(|order| order.as_ref().fulfillment_type == FulfillmentType::MempoolLockAndFulfill);
+
+    if !mempool_orders.is_empty() {
+        tracing::info!("🚀 MEMPOOL PRIORITY: Processing {} mempool orders before {} regular orders", 
+                       mempool_orders.len(), regular_orders.len());
+    }
+
+    // Apply existing priority logic to both groups
+    sort_group_by_priority_and_mode(&mut mempool_orders, priority_addresses, mode);
+    sort_group_by_priority_and_mode(&mut regular_orders, priority_addresses, mode);
+
+    // Mempool orders come first, then regular orders
+    orders.extend(mempool_orders);
+    orders.extend(regular_orders);
+}
+
+// Extract existing logic into helper function
+fn sort_group_by_priority_and_mode<T>(
     orders: &mut Vec<T>,
     priority_addresses: Option<&[alloy::primitives::Address]>,
     mode: UnifiedPriorityMode,

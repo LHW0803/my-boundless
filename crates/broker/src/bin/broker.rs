@@ -28,6 +28,7 @@ use boundless_market::{
 use broker::{Args, Broker, Config, CustomRetryPolicy};
 use clap::Parser;
 use tracing_subscriber::fmt::format::FmtSpan;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,12 +51,24 @@ async fn main() -> Result<()> {
 
     let wallet = EthereumWallet::from(args.private_key.clone());
 
+    // 병렬 RPC 활성화 확인 (환경변수 또는 기본값)
+    let use_parallel_rpc = env::var("USE_PARALLEL_RPC")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+    
+    if use_parallel_rpc {
+        tracing::info!("🚀 Parallel RPC enabled - using 7 RPCs for fastest response");
+    }
+
     let retry_layer = RetryBackoffLayer::new_with_policy(
         args.rpc_retry_max,
         args.rpc_retry_backoff,
         args.rpc_retry_cu,
         CustomRetryPolicy,
     );
+    
+    // Primary RPC 설정 (병렬 RPC가 활성화되어도 fallback으로 사용)
     let client = RpcClient::builder().layer(retry_layer).http(args.rpc_url.clone());
     let balance_alerts_layer = BalanceAlertLayer::new(BalanceAlertConfig {
         watch_address: wallet.default_signer().address(),

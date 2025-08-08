@@ -44,9 +44,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const NEW_ORDER_CHANNEL_CAPACITY: usize = 1000;
-const PRICING_CHANNEL_CAPACITY: usize = 1000;
-const ORDER_STATE_CHANNEL_CAPACITY: usize = 1000;
+const NEW_ORDER_CHANNEL_CAPACITY: usize = 5000;
+const PRICING_CHANNEL_CAPACITY: usize = 5000;
+const ORDER_STATE_CHANNEL_CAPACITY: usize = 5000;
 
 pub(crate) mod aggregator;
 pub(crate) mod chain_monitor;
@@ -55,13 +55,16 @@ pub(crate) mod db;
 pub(crate) mod errors;
 pub mod futures_retry;
 pub(crate) mod market_monitor;
+pub(crate) mod mempool_monitor;
 pub(crate) mod offchain_market_monitor;
 pub(crate) mod order_monitor;
 pub(crate) mod order_picker;
+pub(crate) mod parallel_lock;
 pub(crate) mod prioritization;
 pub(crate) mod provers;
 pub(crate) mod proving;
 pub(crate) mod reaper;
+pub(crate) mod rpc_racer;
 pub(crate) mod rpc_retry_policy;
 pub(crate) mod storage;
 pub(crate) mod submitter;
@@ -167,6 +170,8 @@ enum OrderStatus {
 enum FulfillmentType {
     LockAndFulfill,
     FulfillAfterLockExpire,
+    // High priority: detected from mempool before blockchain confirmation
+    MempoolLockAndFulfill,
     // Currently not supported
     FulfillWithoutLocking,
 }
@@ -275,7 +280,7 @@ impl OrderRequest {
     /// - For FulfillAfterLockExpire/FulfillWithoutLocking orders: returns order expiration
     pub fn expiry(&self) -> u64 {
         match self.fulfillment_type {
-            FulfillmentType::LockAndFulfill => self.request.lock_expires_at(),
+            FulfillmentType::LockAndFulfill | FulfillmentType::MempoolLockAndFulfill => self.request.lock_expires_at(),
             FulfillmentType::FulfillAfterLockExpire => self.request.expires_at(),
             FulfillmentType::FulfillWithoutLocking => self.request.expires_at(),
         }
@@ -629,13 +634,25 @@ where
 
         let config = self.config_watcher.config.clone();
 
-        let loopback_blocks = {
+        let (loopback_blocks, mempool_only_mode, offchain_only_mode) = {
             let config = match config.lock_all() {
                 Ok(res) => res,
                 Err(err) => anyhow::bail!("Failed to lock config in watcher: {err:?}"),
             };
-            config.market.lookback_blocks
+            (config.market.lookback_blocks, config.market.mempool_only_mode, config.market.offchain_only_mode)
         };
+
+        if mempool_only_mode && offchain_only_mode {
+            anyhow::bail!("Cannot enable both mempool_only_mode and offchain_only_mode simultaneously");
+        }
+
+        if mempool_only_mode {
+            tracing::info!("🚀 MEMPOOL-ONLY MODE: Skipping blockchain monitors for maximum speed");
+        }
+
+        if offchain_only_mode {
+            tracing::info!("⚡ OFFCHAIN-ONLY MODE: Processing only offchain order stream orders");
+        }
 
         // Create two cancellation tokens for graceful shutdown:
         // 1. Non-critical tasks (order discovery, picking, monitoring) - cancelled immediately on shutdown signal
@@ -682,51 +699,107 @@ where
         // Create a broadcast channel for order state change messages
         let (order_state_tx, _) = tokio::sync::broadcast::channel(ORDER_STATE_CHANNEL_CAPACITY);
 
-        // spin up a supervisor for the market monitor
-        let market_monitor = Arc::new(market_monitor::MarketMonitor::new(
-            loopback_blocks,
-            self.deployment().boundless_market_address,
-            self.provider.clone(),
-            self.db.clone(),
-            chain_monitor.clone(),
-            self.args.private_key.address(),
-            client.clone(),
-            new_order_tx.clone(),
-            order_state_tx.clone(),
-        ));
+        // Configure monitoring services based on operation mode
+        let block_times = if !mempool_only_mode && !offchain_only_mode {
+            // Normal mode: enable all monitors
+            // spin up a supervisor for the market monitor
+            let market_monitor = Arc::new(market_monitor::MarketMonitor::new(
+                loopback_blocks,
+                self.deployment().boundless_market_address,
+                self.provider.clone(),
+                self.db.clone(),
+                chain_monitor.clone(),
+                self.args.private_key.address(),
+                client.clone(),
+                new_order_tx.clone(),
+                order_state_tx.clone(),
+            ));
 
-        let block_times =
-            market_monitor.get_block_time().await.context("Failed to sample block times")?;
+            let block_times =
+                market_monitor.get_block_time().await.context("Failed to sample block times")?;
 
-        tracing::debug!("Estimated block time: {block_times}");
+            tracing::debug!("Estimated block time: {block_times}");
 
-        let cloned_config = config.clone();
-        let cancel_token = non_critical_cancel_token.clone();
-        supervisor_tasks.spawn(async move {
-            Supervisor::new(market_monitor, cloned_config, cancel_token)
-                .spawn()
-                .await
-                .context("Failed to start market monitor")?;
-            Ok(())
-        });
-
-        // spin up a supervisor for the offchain market monitor
-        if let Some(client_clone) = client {
-            let offchain_market_monitor =
-                Arc::new(offchain_market_monitor::OffchainMarketMonitor::new(
-                    client_clone,
-                    self.args.private_key.clone(),
-                    new_order_tx.clone(),
-                ));
             let cloned_config = config.clone();
             let cancel_token = non_critical_cancel_token.clone();
             supervisor_tasks.spawn(async move {
-                Supervisor::new(offchain_market_monitor, cloned_config, cancel_token)
+                Supervisor::new(market_monitor, cloned_config, cancel_token)
                     .spawn()
                     .await
-                    .context("Failed to start offchain market monitor")?;
+                    .context("Failed to start market monitor")?;
                 Ok(())
             });
+
+            // spin up a supervisor for the offchain market monitor
+            if let Some(ref client_clone) = client {
+                let offchain_market_monitor =
+                    Arc::new(offchain_market_monitor::OffchainMarketMonitor::new(
+                        client_clone.clone(),
+                        self.args.private_key.clone(),
+                        new_order_tx.clone(),
+                    ));
+                let cloned_config = config.clone();
+                let cancel_token = non_critical_cancel_token.clone();
+                supervisor_tasks.spawn(async move {
+                    Supervisor::new(offchain_market_monitor, cloned_config, cancel_token)
+                        .spawn()
+                        .await
+                        .context("Failed to start offchain market monitor")?;
+                    Ok(())
+                });
+            }
+
+            block_times
+        } else if offchain_only_mode {
+            // Offchain-only mode: only enable offchain monitor
+            if let Some(ref client_clone) = client {
+                let offchain_market_monitor =
+                    Arc::new(offchain_market_monitor::OffchainMarketMonitor::new(
+                        client_clone.clone(),
+                        self.args.private_key.clone(),
+                        new_order_tx.clone(),
+                    ));
+                let cloned_config = config.clone();
+                let cancel_token = non_critical_cancel_token.clone();
+                supervisor_tasks.spawn(async move {
+                    Supervisor::new(offchain_market_monitor, cloned_config, cancel_token)
+                        .spawn()
+                        .await
+                        .context("Failed to start offchain market monitor")?;
+                    Ok(())
+                });
+                tracing::info!("⚡ OFFCHAIN-ONLY: Running only offchain monitor");
+            } else {
+                anyhow::bail!("Offchain-only mode requires a valid order_stream_url in deployment configuration");
+            }
+            2 // Default block time for offchain-only mode
+        } else {
+            // Mempool-only mode: skip all monitors except mempool
+            tracing::info!("🚀 MEMPOOL-ONLY: Skipped market monitor and offchain monitor");
+            // ⚡ TURBO MODE: 1초 체크 주기로 단축 (기본 2초에서 단축)
+            // 락 실패 후 다음 시도까지 대기 시간 최소화
+            1
+        };
+
+        // spin up a supervisor for the mempool monitor (skip in offchain-only mode)
+        if !offchain_only_mode {
+            let mempool_monitor = Arc::new(mempool_monitor::MempoolMonitor::new(
+                self.provider.clone(),
+                self.deployment().boundless_market_address,
+                new_order_tx.clone(),
+                client.as_ref().cloned(),
+            ));
+            let cloned_config = config.clone();
+            let cancel_token = non_critical_cancel_token.clone();
+            supervisor_tasks.spawn(async move {
+                Supervisor::new(mempool_monitor, cloned_config, cancel_token)
+                    .spawn()
+                    .await
+                    .context("Failed to start mempool monitor")?;
+                Ok(())
+            });
+        } else {
+            tracing::info!("⚡ OFFCHAIN-ONLY: Skipped mempool monitor");
         }
 
         // Construct the prover object interface
