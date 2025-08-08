@@ -72,8 +72,8 @@ impl OffchainMarketMonitor {
         new_order_tx: tokio::sync::mpsc::Sender<Box<OrderRequest>>,
         cancel_token: CancellationToken,
     ) -> Result<(), OffchainMarketMonitorErr> {
-        // 30분마다 자동 재연결 (메모리/성능 최적화)
-        const RECONNECT_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30분
+        // 300분마다 자동 재연결 (메모리/성능 최적화)
+        const RECONNECT_INTERVAL: Duration = Duration::from_secs(300 * 60); // 300분
         
         tracing::info!("🚀 ULTRA FAST: Connecting to off-chain market: {}", client.base_url);
         tracing::info!("⚡ Auto-reconnect enabled: Every 30 minutes for optimal performance");
