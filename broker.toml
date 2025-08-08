@@ -1,0 +1,220 @@
+[market]
+# Mega-cycle price, denominated in the native token (e.g. ETH).
+#
+# This price is multiplied the number of mega-cycles (i.e. million RISC-V cycles) that the requested
+# execution took, as calculated by running the request in preflight. This is one of the inputs to
+# decide the minimum price to accept for a request.
+mcycle_price = "0"
+# Mega-cycle price, denominated in the Boundless staking token.
+#
+# Similar to the mcycle_price option above. This is used to determine the minimum price to accept an
+# order when paid in staking tokens, as is the case for orders with an expired lock.
+mcycle_price_stake_token = "0"
+# Optional priority requestor addresses that can bypass the mcycle limit and max input size limit.
+#
+# If enabled, the order will be preflighted without constraints.
+priority_requestor_addresses = [
+	"0x48268bE6235A23eb7b67356469362869D5d0293f",
+	"0x0466ACfc0F27bBA9fBB7A8508f576527e81E83Bd",
+	"0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
+	"0xa03829883091ac0f0eaa8b106a40c78a819034f0",
+	"0x2546c553d857d20658ece248f7c7d0861a240681"
+]
+# Estimated peak performance of the proving cluster, in kHz.
+#
+# Used to estimate proving capacity and accept only as much work as the prover can handle. Estimates
+# can be derived from benchmarking using Bento CLI or from data based on fulfilling market orders.
+# For more information, see https://docs.beboundless.xyz/provers/broker#benchmarking-bento
+peak_prove_khz = 10000000
+# Optional max cycles (in mcycles)
+#
+# Orders over this max_cycles will be skipped after preflight
+max_mcycle_limit = 1000000
+# Max journal size in bytes
+#
+# Orders that produce a journal larger than this size in preflight will be skipped. Since journals
+# must be posted onchain to complete an order, an excessively large journal may prevent completion
+# of a request.
+max_journal_bytes = 1000000
+# Min seconds left before the deadline to consider bidding on a request.
+# 
+# If there is not enough time left before the deadline, the prover may not be able to complete
+# proving of the request and finalize the batch for publishing before expiration.
+min_deadline = 3
+# On startup, the number of blocks to look back for possible open orders.
+lookback_blocks = 2 # 300 blocks ~ 1 hour @ 12s block times
+# Max stake amount, denominated in the Boundless staking token.
+#
+# Requests that require a higher stake than this will not be considered.
+max_stake = "150" # USDC
+# Max input / image file size allowed for downloading from request URLs.
+max_file_size = 100_000_000_000
+# Max retries for fetching input / image contents from URLs
+max_fetch_retries = 0
+# Max concurrent locks
+#
+# Maximum number of concurrent proofs that can be processed at once
+max_concurrent_proofs = 20
+# Maximum number of orders to concurrently work on pricing
+#
+# Used to limit pricing tasks spawned to prevent overwhelming the system
+max_concurrent_preflights = 20
+# Order pricing priority mode
+#
+# Determines how orders are prioritized for pricing. Options:
+# - "random": Process orders in random order to distribute competition among provers (default)
+# - "observation_time": Process orders in the order they were observed (FIFO)
+# - "shortest_expiry": Process orders by shortest expiry first (earliest deadline)
+order_pricing_priority = "observation_time"
+# Order commitment priority mode
+#
+# Determines how orders are prioritized when committing to prove them. Options:
+# - "random": Process orders in random order to distribute competition among provers (default)
+# - "shortest_expiry": Process orders by shortest expiry first (lock expiry for lock-and-fulfill orders, request expiry for others)
+#order_commitment_priority = "random"
+# Mempool-only mode
+#
+# When enabled, only processes orders detected in mempool for maximum speed.
+# Disables blockchain event monitoring, order stream, and other non-critical services.
+# WARNING: This mode may miss some orders but provides fastest lock times.
+mempool_only_mode = false
+# Offchain-only mode
+#
+# When enabled, only processes orders from the offchain order stream.
+# Disables blockchain event monitoring and mempool monitoring.
+# WARNING: This mode requires a valid order stream URL and may have different latency characteristics.
+offchain_only_mode = true
+# Max critical task retries on recoverable failures.
+#
+# The broker service has a number of subtasks. Some are considered critical. If a task fails, it
+# will be retried, but after this number of retries, the process will exit.
+max_critical_task_retries = 1
+# Optional allow list for customer address.
+#
+# If enabled, all requests from clients not in the allow list are skipped.
+allow_client_addresses = [
+    "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
+	"0xa03829883091ac0f0eaa8b106a40c78a819034f0",
+	"0x2546c553d857d20658ece248f7c7d0861a240681"
+]
+# Optional deny list for requestor address.
+#
+# If enabled, all requests from clients in the deny list are skipped.
+#deny_requestor_addresses = []
+# lockRequest priority gas
+#
+# Optional additional gas to add to the transaction for lockinRequest, good
+# for increasing the priority if competing with multiple provers during the
+# same block
+lockin_priority_gas = 400000000
+# Optional balance warning threshold (in native token)
+#
+# If the submitter balance drops below this the broker will issue warning logs
+balance_warn_threshold = "0.01"
+# Optional balance error threshold (in native token)
+#
+# If the submitter balance drops below this the broker will issue error logs
+balance_error_threshold = "0.01"
+# Optional stake balance warning threshold (in stake tokens)
+#
+# If the stake balance drops below this the broker will issue warning logs
+stake_balance_warn_threshold = "10"
+# Optional stake balance error threshold (in stake tokens)
+#
+# If the stake balance drops below this the broker will issue error logs
+stake_balance_error_threshold = "1"
+# Optional cache directory for storing downloaded images and inputs
+#
+# If not set, files will be re-downloaded every time
+#cache_dir = "./mempool_cache"
+# Gas estimate for lockin call
+#
+# Used for estimating the gas costs associated with an order during pricing. If not set a
+# conservative default will be used.
+lockin_gas_estimate = 1000000
+# Gas estimate for fulfill call
+#
+# Used for estimating the gas costs associated with an order during pricing. If not set a
+# conservative default will be used.
+#fulfill_gas_estimate = 750000
+# Gas estimate for proof verification using the RiscZeroGroth16Verifier
+#
+# Used for estimating the gas costs associated with an order during pricing. If not set a
+# conservative default will be used.
+#groth16_verify_gas_estimate = 250000
+
+[prover]
+# Number of retries to poll for proving status.
+#
+# Provides a little durability for transient failures.
+status_poll_retry_count = 2
+# Polling interval to monitor proving status (in millisecs)
+status_poll_ms = 200
+# Number of retries to query a prover backend for on failures.
+#
+# Used for API requests to a prover backend, creating sessions, preflighting, uploading images, etc.
+# Provides a little durability for transient failures.
+req_retry_count = 2
+# Number of milliseconds to sleep between retries.
+req_retry_sleep_ms = 50
+# Number of retries to for running the entire proof generation process
+#
+# This is separate from the request retry count, as the proving process
+# is a multi-step process involving multiple API calls to create a proof
+# job and then polling for the proof job to complete.
+proof_retry_count = 1
+# Number of milliseconds to sleep between proof retries.
+proof_retry_sleep_ms = 50
+# Set builder guest program (ELF) path
+#
+# When using a durable deploy, set this to the published current SOT guest
+# program path on the system
+#set_builder_guest_path = "./target/riscv-guest/guest-set-builder/set-builder/riscv32im-risc0-zkvm-elf/release/set-builder.bin"
+# Assessor ELF path
+#assessor_set_guest_path = "./target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin"
+# Interval for checking expired committed orders (in seconds)
+#
+# This is the interval at which the ReaperTask will check for expired orders and mark them as failed.
+# If not set, it defaults to 60 seconds.
+#reaper_interval_secs = 60
+# Grace period before marking expired orders as failed (in seconds)
+#
+# This provides a buffer time after an order expires before the reaper marks it as failed.
+# This helps prevent race conditions with the aggregator that might be processing the order.
+# If not set, it defaults to 10800 seconds (3 hours).
+# reaper_grace_period_secs = 10800
+
+[batcher]
+# Max batch duration before publishing (in seconds)
+batch_max_time = 600
+# Batch size (in proofs) before publishing
+min_batch_size = 1
+# Batch blocktime buffer
+#
+# Number of seconds before the lowest block deadline in the order batch
+# to flush the batch. This should be approximately snark_proving_time * 2
+block_deadline_buffer_secs = 0
+# Timeout, in seconds for transaction confirmations
+txn_timeout = 10
+# Use the single TXN submission that batches submit_merkle / fulfill_batch into
+#
+# A single transaction. Requires the `submitRootAndFulfill` method
+# be present on the deployed contract
+single_txn_fulfill = true
+# Whether to withdraw from the prover balance when fulfilling
+withdraw = false
+# Polling time, in milliseconds
+#
+# The time between polls for new orders to aggregate and how often to check for batch finalize
+# conditions
+batch_poll_time_ms = 50
+# Max combined journal size (in bytes) that once exceeded will trigger a publish
+batch_max_journal_bytes = 100000
+# max batch fees (in ETH) before publishing
+batch_max_fees = "1"
+# Number of attempts to make to submit a batch before abandoning
+max_submission_attempts = 2
+
+# Optional config, only needed if using bonsai to set the zkVM version header. Not necessary when
+# using Bento as the prover.
+# bonsai_r0_zkvm_ver = "2.3.0"
