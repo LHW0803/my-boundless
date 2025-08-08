@@ -20,7 +20,6 @@ use crate::{
     db::DbObj,
     errors::CodedError,
     impl_coded_debug, now_timestamp,
-    parallel_lock::submit_lock_transaction_parallel,
     task::{RetryRes, RetryTask, SupervisorErr},
     utils, FulfillmentType, Order,
 };
@@ -269,36 +268,6 @@ where
         max_fee_per_gas: u64,
         priority_gas: u64,
     ) -> Result<u64, MarketError> {
-        use crate::parallel_lock::submit_lock_transaction_parallel;
-        
-        // 병렬 RPC 사용 여부 확인 (mempool은 속도가 중요하므로 기본값 true)
-        let use_parallel = std::env::var("USE_PARALLEL_RPC")
-            .unwrap_or_else(|_| "true".to_string())
-            .parse::<bool>()
-            .unwrap_or(true);
-        
-        if use_parallel {
-            tracing::info!("⚡ MEMPOOL PARALLEL: Using 7 parallel RPCs for maximum lock success rate");
-            
-            // 병렬 RPC로 lock 트랜잭션 제출
-            let signature_bytes = alloy::primitives::Bytes::from(client_sig);
-            let result = submit_lock_transaction_parallel(
-                request,
-                signature_bytes,
-                Some(priority_gas),
-                *self.market.instance().address(),
-                self.provider.clone(),
-            )
-            .await
-            .map_err(|e| -> MarketError {
-                tracing::error!("Mempool parallel lock failed: {}", e);
-                MarketError::Error(e.into())
-            })?;
-            
-            return Ok(result);
-        }
-        
-        // 기존 단일 RPC 방식 (fallback)
         use alloy::sol_types::SolCall;
         use boundless_market::contracts::IBoundlessMarket::lockRequestCall;
         use boundless_market::contracts::boundless_market::MarketError;
@@ -468,35 +437,11 @@ where
             conf_priority_gas
         );
         
-        // 병렬 RPC 사용 여부 확인
-        let use_parallel = std::env::var("USE_PARALLEL_RPC")
-            .unwrap_or_else(|_| "true".to_string())
-            .parse::<bool>()
-            .unwrap_or(true);
-        
-        let lock_block = if use_parallel {
-            tracing::info!("⚡ Using 7 parallel RPCs for maximum lock success rate");
-            
-            // 병렬 RPC로 lock 트랜잭션 제출
-            submit_lock_transaction_parallel(
-                &order.request,
-                order.client_sig.clone(),
-                conf_priority_gas,
-                self.market_addr,
-                self.provider.clone(),
-            )
+        let lock_block = self
+            .market
+            .lock_request(&order.request, order.client_sig.clone(), conf_priority_gas)
             .await
             .map_err(|e| -> OrderMonitorErr {
-                tracing::error!("Parallel lock failed: {}", e);
-                OrderMonitorErr::LockTxFailed(e.to_string())
-            })?
-        } else {
-            // 기존 단일 RPC 방식
-            self
-                .market
-                .lock_request(&order.request, order.client_sig.clone(), conf_priority_gas)
-                .await
-                .map_err(|e| -> OrderMonitorErr {
                 match e {
                     MarketError::TxnError(txn_err) => match txn_err {
                         TxnErr::BoundlessMarketErr(IBoundlessMarketErrors::RequestIsLocked(_)) => {
@@ -546,8 +491,7 @@ where
                         }
                     }
                 }
-            })?
-        };
+            })?;
 
         // Fetch the block to retrieve the lock timestamp. This has been observed to return
         // inconsistent state between the receipt being available but the block not yet.

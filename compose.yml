@@ -338,7 +338,6 @@ services:
       RPC_URL: ${RPC_URL}
       ORDER_STREAM_CLIENT_PING_MS: 300
       ORDER_STREAM_CLIENT_TIMEOUT_SECS: 2
-      USE_PARALLEL_RPC: "true"
     entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
 
 # # Example second broker with different configuration
