@@ -336,8 +336,8 @@ services:
       <<: *broker-environment
       PRIVATE_KEY: ${PRIVATE_KEY}
       RPC_URL: ${RPC_URL}
-      ORDER_STREAM_CLIENT_PING_MS: 300
-      ORDER_STREAM_CLIENT_TIMEOUT_SECS: 2
+      ORDER_STREAM_CLIENT_PING_MS: 30000
+      ORDER_STREAM_CLIENT_TIMEOUT_SECS: 200
     entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
 
 # # Example second broker with different configuration
