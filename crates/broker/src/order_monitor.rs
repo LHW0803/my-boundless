@@ -400,6 +400,16 @@ where
     }
 
     async fn lock_order(&self, order: &OrderRequest) -> Result<U256, OrderMonitorErr> {
+        // Check if offchain_only_mode is enabled
+        let offchain_mode = {
+            let config = self.config.lock_all().context("Failed to read config")?;
+            config.market.offchain_only_mode
+        };
+        
+        if offchain_mode {
+            return self.lock_order_offchain_direct(order).await;
+        }
+        
         let request_id = order.request.id;
 
         let order_status = self
@@ -519,6 +529,63 @@ where
             .price_at(lock_timestamp)
             .context("Failed to calculate lock price")?;
 
+        Ok(lock_price)
+    }
+
+    async fn lock_order_offchain_direct(&self, order: &OrderRequest) -> Result<U256, OrderMonitorErr> {
+        let request_id = order.request.id;
+        
+        // Skip all pre-validation - contract will handle it
+        // No get_status check
+        // No is_request_locked DB check
+        
+        // Get priority gas from config
+        let conf_priority_gas = {
+            let conf = self.config.lock_all().context("Failed to lock config")?;
+            conf.market.lockin_priority_gas
+        };
+        
+        tracing::info!(
+            "⚡ Offchain: Direct lock 0x{:x} | gas: {} gwei",
+            request_id,
+            conf_priority_gas.unwrap_or(0) / 1_000_000_000
+        );
+        
+        // Send lock transaction directly
+        let lock_block = self
+            .market
+            .lock_request(&order.request, order.client_sig.clone(), conf_priority_gas)
+            .await
+            .map_err(|e| -> OrderMonitorErr {
+                match e {
+                    MarketError::TxnError(txn_err) => match txn_err {
+                        TxnErr::BoundlessMarketErr(IBoundlessMarketErrors::RequestIsLocked(_)) => {
+                            tracing::debug!("Order already locked");
+                            OrderMonitorErr::AlreadyLocked
+                        }
+                        _ => {
+                            tracing::warn!("Lock failed: {}", txn_err);
+                            OrderMonitorErr::LockTxFailed(txn_err.to_string())
+                        }
+                    },
+                    MarketError::RequestAlreadyLocked(_e) => OrderMonitorErr::AlreadyLocked,
+                    _ => {
+                        tracing::warn!("Lock failed: {}", e);
+                        OrderMonitorErr::UnexpectedError(e.into())
+                    }
+                }
+            })?;
+        
+        // Use minPrice instead of calculating from timestamp
+        let lock_price = order.request.offer.minPrice;
+        
+        tracing::info!(
+            "✅ Offchain: Lock success 0x{:x} | block: {} | price: {}",
+            request_id,
+            lock_block,
+            format_ether(lock_price)
+        );
+        
         Ok(lock_price)
     }
 

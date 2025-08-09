@@ -297,6 +297,16 @@ where
         &self,
         order: &mut OrderRequest,
     ) -> Result<OrderPricingOutcome, OrderPickerErr> {
+        // Check if offchain_only_mode is enabled
+        let offchain_mode = {
+            let config = self.config.lock_all().context("Failed to read config")?;
+            config.market.offchain_only_mode
+        };
+        
+        if offchain_mode {
+            return self.price_order_offchain_optimized(order).await;
+        }
+        
         let order_id = order.id();
         tracing::debug!("Pricing order {order_id}");
 
@@ -428,7 +438,7 @@ where
             "Estimated {order_gas} gas to {} order {order_id}; {} ether @ {} gwei",
             if lock_expired { "fulfill" } else { "lock and fulfill" },
             format_ether(order_gas_cost),
-            format_units(gas_price, "gwei").unwrap()
+            format_units(gas_price, "gwei").unwrap_or_else(|_| "invalid".to_string())
         );
 
         if order_gas_cost > order.request.offer.maxPrice && !lock_expired {
@@ -672,6 +682,54 @@ where
             lock_expire_timestamp_secs: order.request.offer.biddingStart
                 + order.request.offer.lockTimeout as u64,
             expiry_secs: order.request.offer.biddingStart + order.request.offer.timeout as u64,
+        })
+    }
+
+    async fn price_order_offchain_optimized(
+        &self,
+        order: &mut OrderRequest,
+    ) -> Result<OrderPricingOutcome, OrderPickerErr> {
+        let order_id = order.id();
+        
+        // Load config to get whitelist
+        let allowed_addresses_opt = {
+            let config = self.config.lock_all().context("Failed to read config")?;
+            config.market.allow_client_addresses.clone()
+        };
+        
+        // Only check whitelist - all other validations removed
+        if let Some(allow_addresses) = allowed_addresses_opt {
+            let client_addr = order.request.client_address();
+            if !allow_addresses.contains(&client_addr) {
+                tracing::debug!(
+                    "Offchain: Skipping {order_id} from {client_addr} - not in allow_client_addresses"
+                );
+                return Ok(OrderPricingOutcome::Skip);
+            }
+            tracing::debug!(
+                "Offchain: {order_id} from {client_addr} - whitelisted"
+            );
+        }
+        
+        // Use mock IDs for fast processing - real upload happens in proving stage
+        order.image_id = None; // Will trigger real upload in proving.rs
+        order.input_id = None; // Will trigger real upload in proving.rs
+        order.total_cycles = Some(100_000_000_000_u64); // 100B cycles fixed
+        
+        // Immediately accept with minPrice
+        let price = order.request.offer.minPrice;
+        
+        tracing::info!(
+            "⚡ Offchain: Fast-approved {order_id} | price: {} | client: {}",
+            format_ether(price),
+            order.request.client_address()
+        );
+        
+        // Return Lock outcome for offchain orders
+        Ok(OrderPricingOutcome::Lock {
+            total_cycles: 100_000_000_000, // Match the value set above (100B cycles)
+            target_timestamp_secs: 0, // Not used in offchain mode
+            expiry_secs: order.request.expires_at(),
         })
     }
 

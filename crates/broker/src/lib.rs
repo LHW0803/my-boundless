@@ -650,6 +650,35 @@ where
 
         if offchain_only_mode {
             tracing::info!("⚡ OFFCHAIN-ONLY MODE: Processing only offchain order stream orders");
+            
+            // Log additional offchain mode configuration details
+            let config = match config.lock_all() {
+                Ok(res) => res,
+                Err(err) => anyhow::bail!("Failed to lock config for offchain logging: {err:?}"),
+            };
+            
+            if let Some(ref allow_addresses) = config.market.allow_client_addresses {
+                tracing::info!("  ✓ Whitelist: {} addresses configured", allow_addresses.len());
+                for addr in allow_addresses.iter().take(5) {
+                    tracing::info!("    - {}", addr);
+                }
+                if allow_addresses.len() > 5 {
+                    tracing::info!("    ... and {} more", allow_addresses.len() - 5);
+                }
+            } else {
+                tracing::info!("  ✓ Whitelist: Disabled (all addresses allowed)");
+            }
+            
+            if let Some(priority_gas) = config.market.lockin_priority_gas {
+                tracing::info!("  ✓ Priority gas: {} gwei", priority_gas / 1_000_000_000);
+            }
+            
+            if let Some(max_concurrent) = config.market.max_concurrent_proofs {
+                tracing::info!("  ✓ Max concurrent proofs: {}", max_concurrent);
+            }
+            
+            tracing::info!("  ✓ Validation: Minimal (whitelist only)");
+            tracing::info!("  ✓ Lock strategy: Direct submission");
         }
 
         // Create two cancellation tokens for graceful shutdown:
@@ -1087,20 +1116,23 @@ where
 /// A very small utility function to get the current unix timestamp in seconds.
 // TODO(#379): Avoid drift relative to the chain's timestamps.
 pub(crate) fn now_timestamp() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("System time went backwards")
+        .as_secs()
 }
 
 // Utility function to format the expiries of a request in a human readable format
 fn format_expiries(request: &ProofRequest) -> String {
-    let now: i64 = now_timestamp().try_into().unwrap();
-    let lock_expires_at: i64 = request.lock_expires_at().try_into().unwrap();
+    let now: i64 = now_timestamp().try_into().unwrap_or(0);
+    let lock_expires_at: i64 = request.lock_expires_at().try_into().unwrap_or(0);
     let lock_expires_delta = lock_expires_at - now;
     let lock_expires_delta_str = if lock_expires_delta > 0 {
         format!("{lock_expires_delta} seconds from now")
     } else {
         format!("{} seconds ago", lock_expires_delta.abs())
     };
-    let expires_at: i64 = request.expires_at().try_into().unwrap();
+    let expires_at: i64 = request.expires_at().try_into().unwrap_or(0);
     let expires_at_delta = expires_at - now;
     let expires_at_delta_str = if expires_at_delta > 0 {
         format!("{expires_at_delta} seconds from now")
