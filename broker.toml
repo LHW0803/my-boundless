@@ -54,11 +54,11 @@ max_fetch_retries = 0
 # Max concurrent locks
 #
 # Maximum number of concurrent proofs that can be processed at once
-max_concurrent_proofs = 20
+max_concurrent_proofs = 7
 # Maximum number of orders to concurrently work on pricing
 #
 # Used to limit pricing tasks spawned to prevent overwhelming the system
-max_concurrent_preflights = 20
+max_concurrent_preflights = 7
 # Order pricing priority mode
 #
 # Determines how orders are prioritized for pricing. Options:
@@ -66,7 +66,7 @@ max_concurrent_preflights = 20
 # - "observation_time": Process orders in the order they were observed (FIFO)
 # - "shortest_expiry": Process orders by shortest expiry first (earliest deadline)
 order_pricing_priority = "observation_time"
-# Order commitment priority mode
+# Order commitment priority modesnark_proving_time
 #
 # Determines how orders are prioritized when committing to prove them. Options:
 # - "random": Process orders in random order to distribute competition among provers (default)
@@ -154,7 +154,7 @@ status_poll_ms = 200
 #
 # Used for API requests to a prover backend, creating sessions, preflighting, uploading images, etc.
 # Provides a little durability for transient failures.
-req_retry_count = 2
+req_retry_count = 5
 # Number of milliseconds to sleep between retries.
 req_retry_sleep_ms = 50
 # Number of retries to for running the entire proof generation process
@@ -162,7 +162,7 @@ req_retry_sleep_ms = 50
 # This is separate from the request retry count, as the proving process
 # is a multi-step process involving multiple API calls to create a proof
 # job and then polling for the proof job to complete.
-proof_retry_count = 1
+proof_retry_count = 5
 # Number of milliseconds to sleep between proof retries.
 proof_retry_sleep_ms = 50
 # Set builder guest program (ELF) path
@@ -193,7 +193,7 @@ min_batch_size = 1
 #
 # Number of seconds before the lowest block deadline in the order batch
 # to flush the batch. This should be approximately snark_proving_time * 2
-block_deadline_buffer_secs = 0
+block_deadline_buffer_secs = 60
 # Timeout, in seconds for transaction confirmations
 txn_timeout = 10
 # Use the single TXN submission that batches submit_merkle / fulfill_batch into
@@ -207,7 +207,7 @@ withdraw = false
 #
 # The time between polls for new orders to aggregate and how often to check for batch finalize
 # conditions
-batch_poll_time_ms = 50
+batch_poll_time_ms = 200
 # Max combined journal size (in bytes) that once exceeded will trigger a publish
 batch_max_journal_bytes = 100000
 # max batch fees (in ETH) before publishing
