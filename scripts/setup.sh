@@ -5,17 +5,15 @@
 # Description:
 #   - Updates the system packages.
 #   - Installs essential boundless packages.
-#   - Installs GPU drivers for provers.
+#   - Installs GPU drivers for provers.   <-- (요청에 따라 실제 설치는 스킵)
 #   - Installs Docker with NVIDIA support.
 #   - Installs Rust programming language.
-#   - Installs CUDA Toolkit.
+#   - Installs CUDA Toolkit.              <-- (컨테이너 사용 전제: 스킵)
 #   - Performs system cleanup.
 #   - Verifies Docker with NVIDIA support.
 #
 # =============================================================================
 
-# Exit immediately if a command exits with a non-zero status,
-# treat unset variables as an error, and propagate errors in pipelines.
 set -euo pipefail
 
 # =============================================================================
@@ -29,30 +27,16 @@ LOG_FILE="/var/log/${SCRIPT_NAME%.sh}.log"
 # Functions
 # =============================================================================
 
-# Function to display informational messages
-info() {
-    printf "\e[34m[INFO]\e[0m %s\n" "$1"
-}
-
-# Function to display success messages
-success() {
-    printf "\e[32m[SUCCESS]\e[0m %s\n" "$1"
-}
-
-# Function to display error messages
-error() {
-    printf "\e[31m[ERROR]\e[0m %s\n" "$1" >&2
-}
+info()   { printf "\e[34m[INFO]\e[0m %s\n" "$1"; }
+success(){ printf "\e[32m[SUCCESS]\e[0m %s\n" "$1"; }
+error()  { printf "\e[31m[ERROR]\e[0m %s\n" "$1" >&2; }
 
 is_package_installed() {
     dpkg -s "$1" &> /dev/null
 }
 
-
-# Function to check if the operating system is Ubuntu
 check_os() {
     if [[ -f /etc/os-release ]]; then
-        # Source the os-release file to get OS information
         # shellcheck source=/dev/null
         . /etc/os-release
         if [[ "${ID,,}" != "ubuntu" ]]; then
@@ -70,7 +54,6 @@ check_os() {
     fi
 }
 
-# Function to update and upgrade the system
 update_system() {
     info "Updating and upgrading the system packages..."
     {
@@ -80,7 +63,6 @@ update_system() {
     success "System packages updated and upgraded successfully."
 }
 
-# Function to install essential packages
 install_packages() {
     local packages=(
         nvtop
@@ -93,7 +75,6 @@ install_packages() {
         lsb-release
         jq
     )
-
     info "Installing essential packages: ${packages[*]}..."
     {
         sudo apt install -y "${packages[@]}"
@@ -101,16 +82,12 @@ install_packages() {
     success "Essential packages installed successfully."
 }
 
-# Function to install GPU drivers
+# ====== CHANGED: GPU 드라이버 설치 완전 스킵 ======
 install_gpu_drivers() {
-    info "Detecting and installing appropriate GPU drivers..."
-    {
-        sudo ubuntu-drivers install
-    } >> "$LOG_FILE" 2>&1
-    success "GPU drivers installed successfully."
+    info "Skipping GPU driver installation (per request). Assuming drivers are preinstalled and nvidia-smi works."
+    return 0
 }
 
-# Function to install Rust
 install_rust() {
     if command -v rustc &> /dev/null; then
         info "Rust is already installed. Skipping Rust installation."
@@ -119,7 +96,6 @@ install_rust() {
         {
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         } >> "$LOG_FILE" 2>&1
-        # Source Rust environment variables for the current session
         if [[ -f "$HOME/.cargo/env" ]]; then
             # shellcheck source=/dev/null
             source "$HOME/.cargo/env"
@@ -131,77 +107,43 @@ install_rust() {
     fi
 }
 
-# Function to install the `just` command runner
 install_just() {
     if command -v just &>/dev/null; then
         info "'just' is already installed. Skipping."
         return
     fi
-
     info "Installing the 'just' command-runner…"
     {
-        # Install the latest pre-built binary straight to /usr/local/bin
         curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
         | sudo bash -s -- --to /usr/local/bin
     } >> "$LOG_FILE" 2>&1
-
     success "'just' installed successfully."
 }
 
-# Function to install CUDA Toolkit
+# ====== CHANGED: CUDA Toolkit 호스트 설치 스킵 ======
 install_cuda() {
-    if is_package_installed "cuda-toolkit"; then
-        info "CUDA Toolkit is already installed. Skipping CUDA installation."
-    else
-        info "Installing CUDA Toolkit and dependencies..."
-        {
-            local distribution
-            distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"'| tr -d '\.')
-            info "Installing Nvidia CUDA keyring and repo"
-            wget https://developer.download.nvidia.com/compute/cuda/repos/$distribution/$(/usr/bin/uname -m)/cuda-keyring_1.1-1_all.deb
-            sudo dpkg -i cuda-keyring_1.1-1_all.deb
-            rm cuda-keyring_1.1-1_all.deb
-            sudo apt-get update
-            sudo apt-get install -y cuda-toolkit
-        } >> "$LOG_FILE" 2>&1
-        success "CUDA Toolkit installed successfully."
-    fi
+    info "Skipping host CUDA Toolkit installation (containers will provide CUDA)."
+    return 0
 }
 
-# Function to install Docker
 install_docker() {
     if command -v docker &> /dev/null; then
         info "Docker is already installed. Skipping Docker installation."
     else
         info "Installing Docker..."
         {
-            # Install prerequisites
             sudo apt install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
-
-            # Add Docker’s official GPG key
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-
-            # Set up the stable repository
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-            # Update package index
             sudo apt update -y
-
-            # Install Docker Engine, CLI, and Containerd
             sudo apt install -y docker-ce docker-ce-cli containerd.io
-
-            # Enable Docker
             sudo systemctl enable docker
-
-            # Start Docker Service
             sudo systemctl start docker
-
         } >> "$LOG_FILE" 2>&1
         success "Docker installed and started successfully."
     fi
 }
 
-# Function to add user to Docker group
 add_user_to_docker_group() {
     local username
     username=$(logname 2>/dev/null || echo "$SUDO_USER")
@@ -218,66 +160,40 @@ add_user_to_docker_group() {
     fi
 }
 
-# Function to install NVIDIA Container Toolkit
+# ====== CHANGED: 최신 nvidia-ctk 방식으로 설치 ======
 install_nvidia_container_toolkit() {
     info "Checking NVIDIA Container Toolkit installation..."
-
-    if is_package_installed "nvidia-docker2"; then
-        success "NVIDIA Container Toolkit (nvidia-docker2) is already installed."
+    if is_package_installed "nvidia-container-toolkit"; then
+        success "NVIDIA Container Toolkit is already installed."
         return
     fi
 
-    info "Installing NVIDIA Container Toolkit..."
-
+    info "Installing NVIDIA Container Toolkit (modern repo/keyring)…"
     {
-        # Add the package repositories
-        local distribution
-        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-        curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-        curl -s -L https://nvidia.github.io/nvidia-docker/"$distribution"/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+          | sudo gpg --dearmor -o /etc/apt/keyrings/nvidia-container-toolkit.gpg
+        distro=$(. /etc/os-release; echo ${ID}${VERSION_ID})
+        curl -fsSL https://nvidia.github.io/libnvidia-container/${distro}/libnvidia-container.list \
+          | sed 's#deb https://#deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.gpg] https://#' \
+          | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
 
-        # Update the package lists
         sudo apt update -y
-
-        # Install the NVIDIA Docker support
-        sudo apt install -y nvidia-docker2
-
-        # Restart Docker to apply changes
-        sudo systemctl restart docker
+        sudo apt install -y nvidia-container-toolkit
     } >> "$LOG_FILE" 2>&1
-
     success "NVIDIA Container Toolkit installed successfully."
 }
 
-# Function to configure Docker daemon for NVIDIA
+# ====== CHANGED: daemon.json 수동 편집 대신 nvidia-ctk ======
 configure_docker_nvidia() {
-    info "Configuring Docker to use NVIDIA runtime by default..."
-
+    info "Configuring Docker to use NVIDIA runtime via nvidia-ctk..."
     {
-        # Create Docker daemon configuration directory if it doesn't exist
-        sudo mkdir -p /etc/docker
-
-        # Create or overwrite daemon.json with NVIDIA runtime configuration
-        sudo tee /etc/docker/daemon.json <<EOF
-{
-    "default-runtime": "nvidia",
-    "runtimes": {
-        "nvidia": {
-            "path": "nvidia-container-runtime",
-            "runtimeArgs": []
-        }
-    }
-}
-EOF
-
-        # Restart Docker to apply the new configuration
+        sudo nvidia-ctk runtime configure --runtime=docker
         sudo systemctl restart docker
     } >> "$LOG_FILE" 2>&1
-
-    success "Docker configured to use NVIDIA runtime by default."
+    success "Docker configured to use NVIDIA runtime."
 }
 
-# Function to perform system cleanup
 cleanup() {
     info "Cleaning up unnecessary packages..."
     {
@@ -299,56 +215,27 @@ init_git_submodules() {
 # Main Script Execution
 # =============================================================================
 
-# Redirect all output to log file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Display start message with timestamp
 info "===== Script Execution Started at $(date) ====="
 
-# Check if the operating system is Ubuntu
 check_os
-
-# ensure all the require source code is present
 init_git_submodules
-
-# Update and upgrade the system
 update_system
-
-# Install essential packages
 install_packages
-
-# Install GPU drivers
-install_gpu_drivers
-
-# Install Docker
+install_gpu_drivers          # 이제는 no-op(스킵)
 install_docker
-
-# Add user to Docker group
 add_user_to_docker_group
-
-# Install NVIDIA Container Toolkit
 install_nvidia_container_toolkit
-
-# Configure Docker to use NVIDIA runtime
 configure_docker_nvidia
-
-# Install Rust
 install_rust
-
-# Install Just
 install_just
-
-# Install CUDA Toolkit
-install_cuda
-
-# Cleanup
+install_cuda                 # 스킵
 cleanup
 
 success "All tasks completed successfully!"
 
-# Optionally, prompt to reboot if necessary
 if [ -t 0 ]; then
-    # We're in an interactive terminal
     read -rp "Do you want to reboot now to apply all changes? (y/N): " REBOOT
     case "$REBOOT" in
         [yY][eE][sS]|[yY])
@@ -360,11 +247,8 @@ if [ -t 0 ]; then
             ;;
     esac
 else
-    # We're in a non-interactive environment (like EC2 user data)
     info "Running in non-interactive mode. Skipping reboot prompt."
 fi
 
-# Display end message with timestamp
 info "===== Script Execution Ended at $(date) ====="
-
 exit 0
