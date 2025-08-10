@@ -72,8 +72,8 @@ impl OffchainMarketMonitor {
         new_order_tx: tokio::sync::mpsc::Sender<Box<OrderRequest>>,
         cancel_token: CancellationToken,
     ) -> Result<(), OffchainMarketMonitorErr> {
-        // 300분마다 자동 재연결 (메모리/성능 최적화)
-        const RECONNECT_INTERVAL: Duration = Duration::from_secs(300 * 60); // 300분
+        // 3000분마다 자동 재연결 (메모리/성능 최적화)
+        const RECONNECT_INTERVAL: Duration = Duration::from_secs(3000 * 60); // 3000분
         
         tracing::info!("🚀 ULTRA FAST: Connecting to off-chain market: {}", client.base_url);
         tracing::info!("⚡ Auto-reconnect enabled: Every 30 minutes for optimal performance");
@@ -133,13 +133,17 @@ impl OffchainMarketMonitor {
                             let order_id = order_data.id;
                             
                             // Create order immediately - no logging delays
-                            let new_order = OrderRequest::new(
+                            let mut new_order = OrderRequest::new(
                                 order_data.order.request,
                                 order_data.order.signature.as_bytes().into(),
                                 FulfillmentType::MempoolLockAndFulfill,
                                 client.boundless_market_address,
                                 client.chain_id,
                             );
+                            
+                            // Set 15 minute expiration for offchain orders
+                            use chrono::Utc;
+                            new_order.expire_timestamp = Some((Utc::now().timestamp() + 900) as u64); // 15 minutes = 900 seconds
 
                             // Ultra-fast unbounded send (no blocking)
                             if let Err(_) = ultra_tx.send(Box::new(new_order)) {
