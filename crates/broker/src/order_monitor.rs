@@ -40,7 +40,10 @@ use boundless_market::contracts::{
 };
 use boundless_market::selector::SupportedSelectors;
 use moka::{future::Cache, Expiry};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
@@ -49,6 +52,9 @@ use tokio_util::sync::CancellationToken;
 
 /// Hard limit on the number of orders to concurrently kick off proving work for.
 const MAX_PROVING_BATCH_SIZE: u32 = 10;
+
+/// Global capacity snapshot - updated every 30 seconds from DB
+static CAPACITY_SNAPSHOT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Error)]
 pub enum OrderMonitorErr {
@@ -889,8 +895,12 @@ where
             .request_capacity(num_orders.try_into().expect("Failed to convert order count to u32"))
             as usize;
 
+        // 📊 Also log current snapshot for comparison
+        let snapshot_count = CAPACITY_SNAPSHOT.load(Ordering::Relaxed);
+        let max_proofs = config.max_concurrent_proofs.unwrap_or(999);
+        
         tracing::info!(
-            "Num orders ready for locking and/or proving: {}. Total capacity available: {capacity:?}, Capacity granted: {capacity_granted:?}",
+            "📊 REGULAR ORDER PROCESSING: {} orders ready | DB capacity: {capacity:?}, Granted: {capacity_granted} | Snapshot: {snapshot_count}/{max_proofs}",
             num_orders
         );
 
@@ -1088,6 +1098,59 @@ where
         self,
         cancel_token: CancellationToken,
     ) -> Result<(), OrderMonitorErr> {
+        // 📊 Initialize capacity snapshot from DB
+        let initial_committed_orders = self
+            .db
+            .get_committed_orders()
+            .await
+            .map_err(|e| OrderMonitorErr::UnexpectedError(e.into()))?;
+        CAPACITY_SNAPSHOT.store(initial_committed_orders.len() as u32, Ordering::Relaxed);
+        
+        let max_proofs = {
+            let config = self.config.lock_all().context("Failed to read config")?;
+            config.market.max_concurrent_proofs.unwrap_or(999)
+        };
+        
+        tracing::info!(
+            "🔄 CAPACITY INITIALIZED: {}/{} active proofs",
+            initial_committed_orders.len(),
+            max_proofs
+        );
+
+        // 🔄 Start background capacity sync task (every 30 seconds)
+        let db_clone = self.db.clone();
+        let config_clone = self.config.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                
+                match db_clone.get_committed_orders().await {
+                    Ok(orders) => {
+                        let count = orders.len() as u32;
+                        CAPACITY_SNAPSHOT.store(count, Ordering::Relaxed);
+                        
+                        // Get current max_proofs from config
+                        let max_proofs = {
+                            match config_clone.lock_all() {
+                                Ok(config) => config.market.max_concurrent_proofs.unwrap_or(999),
+                                Err(_) => 999, // fallback if config lock fails
+                            }
+                        };
+                        
+                        tracing::info!(
+                            "📊 CAPACITY SYNC: {}/{} active proofs (updated every 30s)",
+                            count,
+                            max_proofs
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to sync capacity snapshot: {:?}", e);
+                    }
+                }
+            }
+        });
+
         let mut last_block = 0;
         let mut first_block = 0;
         
@@ -1197,18 +1260,46 @@ where
         let is_mempool = order.fulfillment_type == FulfillmentType::MempoolLockAndFulfill;
         
         if is_mempool {
+            // 📊 Check capacity before processing mempool order
+            let current_count = CAPACITY_SNAPSHOT.load(Ordering::Relaxed);
+            let max_proofs = {
+                let config = self.config.lock_all().context("Failed to read config")?;
+                config.market.max_concurrent_proofs.unwrap_or(999)
+            };
+            
             tracing::info!(
-                "⚡ MEMPOOL ORDER RECEIVED: {} - IMMEDIATE LOCKING!",
-                order.id()
+                "⚡ MEMPOOL ORDER RECEIVED: {} - Current capacity: {}/{}",
+                order.id(), current_count, max_proofs
             );
             
-            // 🔥 멤풀 주문은 즉시 락킹 시도 (Send 문제 회피를 위해 간단하게)
+            if current_count >= max_proofs {
+                tracing::warn!(
+                    "❌ MEMPOOL ORDER REJECTED: {} - Capacity full ({}/{})",
+                    order.id(), current_count, max_proofs
+                );
+                
+                // Record rejected order in DB
+                let order_arc: Arc<OrderRequest> = Arc::from(order);
+                if let Err(db_err) = self.db.insert_skipped_request(&*order_arc).await {
+                    tracing::error!("Failed to record rejected mempool order: {} - {:?}", order_arc.id(), db_err);
+                }
+                return Ok(());
+            }
+            
+            // 🔥 멤풀 주문은 즉시 락킹 시도 (capacity 여유 있을 때만)
             let order_arc: Arc<OrderRequest> = Arc::from(order);
             
             // 🚀 MEMPOOL ONLY: 최적화된 락킹 메서드 사용
             match self.mempool_lock_order_fast(&*order_arc).await {
                 Ok(lock_price) => {
-                    tracing::info!("✅ MEMPOOL ORDER IMMEDIATELY LOCKED: {} - Price: {}", order_arc.id(), lock_price);
+                    // 📈 Increment capacity counter immediately 
+                    CAPACITY_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
+                    let new_count = current_count + 1;
+                    
+                    tracing::info!(
+                        "✅ MEMPOOL ORDER LOCKED: {} - Price: {} - New capacity: {}/{}",
+                        order_arc.id(), lock_price, new_count, max_proofs
+                    );
                     
                     // DB에 락 성공 기록 (상태를 PendingProving으로 변경)
                     if let Err(db_err) = self.db.insert_accepted_request(&*order_arc, lock_price).await {
@@ -1217,6 +1308,8 @@ where
                             order_arc.id(),
                             db_err
                         );
+                        // Decrement counter on DB error
+                        CAPACITY_SNAPSHOT.fetch_sub(1, Ordering::Relaxed);
                     }
                     
                     // 🚀 증명 시작: 캐시에서 제거하고 증명 단계로 이동
