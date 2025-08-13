@@ -68,6 +68,7 @@ pub(crate) mod storage;
 pub(crate) mod submitter;
 pub(crate) mod task;
 pub(crate) mod utils;
+pub(crate) mod websocket_client;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]

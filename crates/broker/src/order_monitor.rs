@@ -22,15 +22,19 @@ use crate::{
     impl_coded_debug, now_timestamp,
     task::{RetryRes, RetryTask, SupervisorErr},
     utils, FulfillmentType, Order,
+    websocket_client::WebSocketClient,
 };
 use alloy::{
-    network::Ethereum,
+    consensus::{TxEip1559, TypedTransaction, SignableTransaction},
+    eips::Encodable2718,
+    network::{Ethereum, TransactionBuilder, TxSigner},
     primitives::{
         utils::{format_ether, parse_units},
-        Address, U256,
+        Address, FixedBytes, U256,
     },
     providers::{Provider, WalletProvider},
     rpc::types::TransactionRequest,
+    signers::local::PrivateKeySigner,
 };
 use anyhow::{Context, Result};
 use boundless_market::contracts::{
@@ -46,6 +50,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use hex;
 use tokio::sync::{mpsc, Mutex};
 // use tokio::task::JoinSet; // 비활성화: 사용하지 않음
 use tokio_util::sync::CancellationToken;
@@ -173,6 +178,7 @@ pub struct OrderMonitor<P> {
     prove_cache: Arc<Cache<String, Arc<OrderRequest>>>,
     supported_selectors: SupportedSelectors,
     rpc_retry_config: RpcRetryConfig,
+    websocket_client: Arc<Mutex<WebSocketClient>>,
 }
 
 impl<P> OrderMonitor<P>
@@ -221,6 +227,9 @@ where
                     .map(|s| parse_units(s, stake_token_decimals).unwrap().into()),
             );
         }
+        // 🚀 WebSocket 클라이언트 초기화 (연결은 lazy loading으로 처리)
+        let websocket_client = Arc::new(Mutex::new(WebSocketClient::new_disconnected()));
+
         let monitor = Self {
             db,
             chain_monitor,
@@ -235,6 +244,7 @@ where
             prove_cache: Arc::new(Cache::builder().expire_after(OrderExpiry).build()),
             supported_selectors: SupportedSelectors::default(),
             rpc_retry_config,
+            websocket_client,
         };
         Ok(monitor)
     }
@@ -255,12 +265,6 @@ where
         let base_fee = 1_000_000_000u64; // 1 gwei 고정 (안전한 값)
         let max_fee_per_gas = base_fee + priority_gas + (priority_gas / 2); // 추가 여유분
         
-        tracing::debug!(
-            "🚀 FAST GAS FILL: Limit={}, MaxFee={} gwei, Priority={} gwei", 
-            gas_limit, 
-            max_fee_per_gas / 1_000_000_000,
-            priority_gas / 1_000_000_000
-        );
         
         Ok((gas_limit, max_fee_per_gas, priority_gas))
     }
@@ -279,7 +283,6 @@ where
         use boundless_market::contracts::boundless_market::MarketError;
         
         // ⚡ 상태 확인 생략 (mempool에서 이미 확인됨)
-        tracing::debug!("🚀 FAST LOCK: Skipping requestIsLocked check for speed");
 
         // 직접 트랜잭션 구성
         let call_data = lockRequestCall {
@@ -297,22 +300,28 @@ where
             .max_priority_fee_per_gas(priority_gas as u128)
             .transaction_type(2); // EIP-1559
 
-        tracing::debug!("🚀 FAST LOCK: Sending transaction with optimized gas settings");
         
-        // 트랜잭션 전송 (기존 market.lock_request 우회)
-        let pending_tx = self.provider
-            .send_transaction(tx)
-            .await
-            .map_err(|e| MarketError::Error(e.into()))?;
+        // 🔄 환경변수에 따른 전송 방식 선택
+        let tx_hash_string = if std::env::var("USE_HTTP").unwrap_or_default() == "true" {
+            tracing::info!("🌐 Using HTTP method for transaction transmission");
+            self.send_transaction_via_http(tx).await
+                .map_err(|e| MarketError::Error(anyhow::anyhow!("HTTP transaction failed: {}", e)))?
+        } else {
+            tracing::info!("🚀 Using WebSocket method for transaction transmission");
+            self.send_transaction_via_websocket(tx).await
+                .map_err(|e| MarketError::Error(anyhow::anyhow!("WebSocket transaction failed: {}", e)))?
+        };
+        
+        let tx_hash: FixedBytes<32> = tx_hash_string.parse()
+            .map_err(|e| MarketError::Error(anyhow::anyhow!("Invalid transaction hash format: {}", e)))?;
 
-        let tx_hash = *pending_tx.tx_hash();
-        tracing::info!("🚀 FAST LOCK: Broadcasted tx {} with minimal RPC calls", tx_hash);
 
-        // 트랜잭션 확인 (기존 로직 재사용)
-        let receipt = pending_tx
-            .get_receipt()
+        // 트랜잭션 확인 (WebSocket 후 provider로 receipt 조회)
+        let receipt = self.provider
+            .get_transaction_receipt(tx_hash)
             .await
-            .map_err(|e| MarketError::TxnConfirmationError(e.into()))?;
+            .map_err(|e| MarketError::TxnConfirmationError(e.into()))?
+            .ok_or_else(|| MarketError::TxnConfirmationError(anyhow::anyhow!("Transaction receipt not found")))?;
 
         if !receipt.status() {
             return Err(MarketError::LockRevert(receipt.transaction_hash));
@@ -326,6 +335,89 @@ where
         );
 
         Ok(receipt.block_number.unwrap_or_default())
+    }
+
+    // 🚀 WebSocket을 통한 완전한 Raw Transaction 전송
+    async fn send_transaction_via_websocket(&self, tx: TransactionRequest) -> Result<String, anyhow::Error> {
+        let start_time = std::time::Instant::now();
+        
+        // 1. 트랜잭션 필드 완성 (~3-5ms)
+        let chain_id = 8453u64; // Base mainnet chain ID (하드코딩으로 최적화)
+        
+        let nonce = if let Some(n) = tx.nonce {
+            n
+        } else {
+            self.provider.get_transaction_count(self.prover_addr).await?
+        };
+        
+        // 2. EIP-1559 트랜잭션 구성 (~1-2ms)
+        let typed_tx = TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit: tx.gas.unwrap_or(21000),
+            max_fee_per_gas: tx.max_fee_per_gas.unwrap_or(0),
+            max_priority_fee_per_gas: tx.max_priority_fee_per_gas.unwrap_or(0),
+            to: tx.to.unwrap_or_default(),
+            value: tx.value.unwrap_or_default(),
+            input: tx.input.input.unwrap_or_default(),
+            access_list: Default::default(),
+        };
+        
+        
+        // 3. 완전한 WebSocket 전용 raw transaction 생성
+        // HTTP 없이 순수 WebSocket만 사용
+        
+        // 서명을 위해 현재 환경의 private key 사용 (기존 설정 재활용)
+        // 실제 환경에서는 broker가 이미 private key를 가지고 있음
+        
+        // ✅ PRODUCTION: PRIVATE_KEY 환경변수를 사용한 실제 서명
+        let private_key_str = std::env::var("PRIVATE_KEY")
+            .map_err(|_| anyhow::anyhow!("환경변수 PRIVATE_KEY가 설정되지 않았습니다"))?;
+        
+        let signer = private_key_str.parse::<PrivateKeySigner>()
+            .map_err(|e| anyhow::anyhow!("PRIVATE_KEY 파싱 오류: {}", e))?;
+        
+        
+        // EIP-1559 트랜잭션을 TypedTransaction으로 변환
+        let mut typed_transaction = TypedTransaction::Eip1559(typed_tx);
+        
+        // 트랜잭션 서명
+        let signature = signer.sign_transaction(&mut typed_transaction).await
+            .map_err(|e| anyhow::anyhow!("트랜잭션 서명 실패: {}", e))?;
+        
+        
+        // 서명된 트랜잭션 생성 및 RLP 인코딩
+        let signed_tx = typed_transaction.into_signed(signature);
+        // Signed 타입에서 encoded_2718 메서드를 사용하여 바이트 얻기
+        let raw_tx_bytes = signed_tx.encoded_2718();
+        let raw_tx = format!("0x{}", hex::encode(&raw_tx_bytes));
+        
+        
+        // 5. WebSocket으로 전송 (~30-50ms)
+        let mut websocket_client = self.websocket_client.lock().await;
+        
+        let tx_hash = websocket_client.send_raw_transaction(&raw_tx).await
+            .map_err(|e| anyhow::anyhow!("WebSocket transmission failed: {}", e))?;
+        
+        let total_time = start_time.elapsed();
+        tracing::info!("⚡ WebSocket TX Success: {} ({:?})", tx_hash, total_time);
+        
+        Ok(tx_hash)
+    }
+
+    // 🌐 HTTP를 통한 기존 트랜잭션 전송 (비교용)
+    async fn send_transaction_via_http(&self, tx: TransactionRequest) -> Result<String, anyhow::Error> {
+        let start_time = std::time::Instant::now();
+        
+        let pending_tx = self.provider.send_transaction(tx).await
+            .map_err(|e| anyhow::anyhow!("HTTP transaction failed: {}", e))?;
+        
+        let tx_hash = format!("{:?}", pending_tx.tx_hash());
+        
+        let total_time = start_time.elapsed();
+        tracing::info!("🌐 HTTP TX Success: {} ({:?})", tx_hash, total_time);
+        
+        Ok(tx_hash)
     }
 
     // 🚀 MEMPOOL ONLY: 극한 최적화된 락킹 (검증 최소화)
@@ -400,7 +492,6 @@ where
         // 백그라운드 처리 대신 즉시 추정값 반환으로 극한 성능 달성
         let estimated_price = order.request.offer.minPrice; // 최소 가격으로 추정
         tracing::info!("⚡ MEMPOOL FAST LOCK COMPLETED: 0x{:x} | Estimated Price: {}", request_id, estimated_price);
-        tracing::debug!("🔍 MEMPOOL FAST: Block {} - Price calculation skipped for speed", lock_block);
         
         Ok(estimated_price)
     }
@@ -978,13 +1069,6 @@ where
                 tracing::warn!("Proofs are behind what is estimated from peak_prove_khz config by {} seconds. Consider lowering this value to avoid overlocking orders.", seconds_behind);
                 prover_available_at = now;
             }
-            tracing::debug!("Already committed to {} orders, with a total cycle count of {}, a peak khz limit of {}, started working on them at {}, we estimate the prover will be available in {} seconds", 
-                num_commited_orders,
-                total_commited_cycles,
-                peak_prove_khz,
-                started_proving_at,
-                prover_available_at.saturating_sub(now),
-            );
 
             // For each order in consideration, check if it can be completed before its expiration
             // and that there is enough gas to pay for the lock and fulfillment of all orders
@@ -1037,12 +1121,10 @@ where
                         // permanently. Otherwise, will retry including the order.
                         self.skip_order(&order, "cannot be completed before expiration").await;
                     } else {
-                        tracing::debug!("Given current commited orders and capacity, order 0x{:x} cannot be completed before its expiration. Not skipping as capacity may free up before it expires.", order.request.id);
                     }
                     continue;
                 }
 
-                tracing::debug!("Order {} estimated to take {} seconds (including assessor + set builder), and would be completed at {} ({} seconds from now). It expires at {} ({} seconds from now)", order.id(), proof_time_seconds, completion_time, completion_time.saturating_sub(now_timestamp()), expiration, expiration.saturating_sub(now_timestamp()));
 
                 final_orders.push(order);
                 prover_available_at = completion_time;

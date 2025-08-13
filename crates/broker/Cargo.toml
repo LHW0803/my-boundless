@@ -45,6 +45,7 @@ sqlx = { workspace = true, features = ["sqlite", "postgres", "runtime-tokio", "j
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 toml = "0.8"
 tracing = { workspace = true }
