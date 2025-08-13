@@ -50,15 +50,15 @@ max_stake = "150" # USDC
 # Max input / image file size allowed for downloading from request URLs.
 max_file_size = 100_000_000_000
 # Max retries for fetching input / image contents from URLs
-max_fetch_retries = 0
+max_fetch_retries = 1
 # Max concurrent locks
 #
 # Maximum number of concurrent proofs that can be processed at once
-max_concurrent_proofs = 100
+max_concurrent_proofs = 2
 # Maximum number of orders to concurrently work on pricing
 #
 # Used to limit pricing tasks spawned to prevent overwhelming the system
-max_concurrent_preflights = 2
+max_concurrent_preflights = 5
 # Order pricing priority mode
 #
 # Determines how orders are prioritized for pricing. Options:
@@ -88,7 +88,7 @@ offchain_only_mode = true
 #
 # The broker service has a number of subtasks. Some are considered critical. If a task fails, it
 # will be retried, but after this number of retries, the process will exit.
-max_critical_task_retries = 1
+max_critical_task_retries = 3
 # Optional allow list for customer address.
 #
 # If enabled, all requests from clients not in the allow list are skipped.
@@ -106,7 +106,7 @@ allow_client_addresses = [
 # Optional additional gas to add to the transaction for lockinRequest, good
 # for increasing the priority if competing with multiple provers during the
 # same block
-lockin_priority_gas = 400000000
+lockin_priority_gas = 869000000
 # Optional balance warning threshold (in native token)
 #
 # If the submitter balance drops below this the broker will issue warning logs
@@ -154,17 +154,17 @@ status_poll_ms = 200
 #
 # Used for API requests to a prover backend, creating sessions, preflighting, uploading images, etc.
 # Provides a little durability for transient failures.
-req_retry_count = 5
+req_retry_count = 3
 # Number of milliseconds to sleep between retries.
-req_retry_sleep_ms = 50
+req_retry_sleep_ms = 5000
 # Number of retries to for running the entire proof generation process
 #
 # This is separate from the request retry count, as the proving process
 # is a multi-step process involving multiple API calls to create a proof
 # job and then polling for the proof job to complete.
-proof_retry_count = 5
+proof_retry_count = 2
 # Number of milliseconds to sleep between proof retries.
-proof_retry_sleep_ms = 50
+proof_retry_sleep_ms = 5000
 # Set builder guest program (ELF) path
 #
 # When using a durable deploy, set this to the published current SOT guest
@@ -182,11 +182,11 @@ proof_retry_sleep_ms = 50
 # This provides a buffer time after an order expires before the reaper marks it as failed.
 # This helps prevent race conditions with the aggregator that might be processing the order.
 # If not set, it defaults to 10800 seconds (3 hours).
-# reaper_grace_period_secs = 10800
+reaper_grace_period_secs = 90
 
 [batcher]
 # Max batch duration before publishing (in seconds)
-batch_max_time = 600
+batch_max_time = 1
 # Batch size (in proofs) before publishing
 min_batch_size = 1
 # Batch blocktime buffer

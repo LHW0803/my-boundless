@@ -22,8 +22,8 @@ x-agent-common: &agent-common
 
 x-exec-agent-common: &exec-agent-common
   <<: *agent-common
-  mem_limit: 4G
-  cpus: 3
+  mem_limit: 12G
+  cpus: 8
   environment:
     <<: *base-environment
     LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
@@ -80,6 +80,8 @@ services:
     hostname: ${POSTGRES_HOST:-postgres}
     image: ${POSTGRES_IMG:-postgres:16.3-bullseye}
     restart: always
+    mem_limit: 32g
+    cpus: '8'
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-taskdb}
       POSTGRES_USER: ${POSTGRES_USER:-worker}
@@ -90,7 +92,21 @@ services:
       - '${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}'
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    command: -p ${POSTGRES_PORT:-5432}
+    command: >
+      postgres
+      -p ${POSTGRES_PORT:-5432}
+      -c max_connections=200
+      -c shared_buffers=10GB
+      -c effective_cache_size=30GB
+      -c maintenance_work_mem=2GB
+      -c work_mem=256MB
+      -c wal_buffers=64MB
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=8
+      -c max_parallel_maintenance_workers=4
 
   minio:
     hostname: ${MINIO_HOST:-minio}
@@ -155,8 +171,8 @@ services:
   gpu_prove_agent0:
     <<: *agent-common
     runtime: nvidia
-    mem_limit: 4G
-    cpus: 4
+    mem_limit: 32G
+    cpus: 9
     entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
 
     # comment-out if running in CPU proving mode
@@ -169,6 +185,108 @@ services:
               device_ids: ['0']
               capabilities: [gpu]
 
+  gpu_prove_agent1:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['1']
+              capabilities: [gpu]
+
+  gpu_prove_agent2:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['2']
+              capabilities: [gpu]
+
+  gpu_prove_agent3:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['3']
+              capabilities: [gpu]
+
+  gpu_prove_agent4:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['4']
+              capabilities: [gpu]
+
+  gpu_prove_agent5:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['5']
+              capabilities: [gpu]
+
+  gpu_prove_agent6:
+    <<: *agent-common
+    runtime: nvidia
+    mem_limit: 32G
+    cpus: 9
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+
+    # comment-out if running in CPU proving mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # TODO: how to scale this with N gpus?
+              device_ids: ['6']
+              capabilities: [gpu]
+
   snark_agent:
     <<: *agent-common
     entrypoint: /app/agent -t snark --redis-ttl ${REDIS_TTL:-57600}
@@ -179,7 +297,7 @@ services:
     ulimits:
       # Needed for stark_verify bin
       # TODO: this number was just guess and check found
-      stack: 90000000
+      stack: 256000000
 
   rest_api:
     image: risczero/risc0-bento-rest-api:2.3.1@sha256:71dafe532d4e1ada47989b63cf04b2e2bae6b62eebb5d47973e875e2eddf6c3a
@@ -188,8 +306,8 @@ services:
       - postgres
       - minio
 
-    mem_limit: 1G
-    cpus: 1
+    mem_limit: 4G
+    cpus: 4
 
     environment:
       <<: *base-environment

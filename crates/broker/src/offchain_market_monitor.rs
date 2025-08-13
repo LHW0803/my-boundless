@@ -143,7 +143,7 @@ impl OffchainMarketMonitor {
                             
                             // Set 15 minute expiration for offchain orders
                             use chrono::Utc;
-                            new_order.expire_timestamp = Some((Utc::now().timestamp() + 900) as u64); // 15 minutes = 900 seconds
+                            new_order.expire_timestamp = Some((Utc::now().timestamp() + 840) as u64); // 15 minutes = 900 seconds
 
                             // Ultra-fast unbounded send (no blocking)
                             if let Err(_) = ultra_tx.send(Box::new(new_order)) {
