@@ -51,6 +51,12 @@ x-broker-common: &broker-common
   depends_on:
     - rest_api
     - gpu_prove_agent0
+    - gpu_prove_agent1
+    - gpu_prove_agent2
+    - gpu_prove_agent3
+    - gpu_prove_agent4
+    - gpu_prove_agent5
+    - gpu_prove_agent6
     - exec_agent0
     - exec_agent1
     - aux_agent
