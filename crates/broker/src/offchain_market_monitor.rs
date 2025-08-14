@@ -80,7 +80,7 @@ impl OffchainMarketMonitor {
         
         // Set ping interval from environment variable (default: 2000ms for stability)
         let ping_ms = std::env::var("ORDER_STREAM_CLIENT_PING_MS")
-            .unwrap_or_else(|_| "2000".to_string());
+            .unwrap_or_else(|_| "30000".to_string());
         std::env::set_var("ORDER_STREAM_CLIENT_PING_MS", &ping_ms);
         
         // Connection timeout from environment variable (default: 5 seconds)

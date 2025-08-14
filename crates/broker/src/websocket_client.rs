@@ -26,9 +26,13 @@ use tracing::{debug, error, info, warn};
 type WebSocketSender = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>;
 type WebSocketReceiver = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
 
-const WEBSOCKET_URL: &str = "wss://lb.drpc.org/base/ApklQs6JokXxjviH4hmf1eWmN3aZdDIR8IfXIgaNGuYu";
+const DEFAULT_WEBSOCKET_URL: &str = "wss://lb.drpc.org/base/ApklQs6JokXxjviH4hmf1eWmN3aZdDIR8IfXIgaNGuYu";
 const RESPONSE_TIMEOUT_SECS: u64 = 5;
 const RECONNECT_DELAY_MS: u64 = 1000;
+
+fn get_websocket_url() -> String {
+    std::env::var("WEBSOCKET_URL").unwrap_or_else(|_| DEFAULT_WEBSOCKET_URL.to_string())
+}
 
 #[derive(Debug)]
 pub struct WebSocketClient {
@@ -61,10 +65,11 @@ impl WebSocketClient {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        debug!("🔌 WebSocket: Connecting to {}", WEBSOCKET_URL);
+        let websocket_url = get_websocket_url();
+        debug!("🔌 WebSocket: Connecting to {}", websocket_url);
         
         // String을 직접 사용 (tokio-tungstenite는 &str을 받음)
-        let (ws_stream, _) = connect_async(WEBSOCKET_URL).await
+        let (ws_stream, _) = connect_async(&websocket_url).await
             .map_err(|e| anyhow!("WebSocket connection failed: {}", e))?;
         
         let (sender, receiver) = ws_stream.split();
@@ -75,7 +80,7 @@ impl WebSocketClient {
         let waiters = Arc::clone(&self.response_waiters);
         tokio::spawn(Self::handle_responses(receiver, waiters));
         
-        info!("✅ WebSocket: Connected successfully to {}", WEBSOCKET_URL);
+        info!("✅ WebSocket: Connected successfully to {}", websocket_url);
         Ok(())
     }
 

@@ -317,15 +317,46 @@ where
 
 
         // 트랜잭션 확인 (WebSocket 후 provider로 receipt 조회)
-        let receipt = self.provider
-            .get_transaction_receipt(tx_hash)
-            .await
-            .map_err(|e| MarketError::TxnConfirmationError(e.into()))?
-            .ok_or_else(|| MarketError::TxnConfirmationError(anyhow::anyhow!("Transaction receipt not found")))?;
-
-        if !receipt.status() {
-            return Err(MarketError::LockRevert(receipt.transaction_hash));
+        // Receipt 재시도 로직 추가 (3회)
+        let mut receipt = None;
+        let max_retries = 3;
+        let retry_delay = std::time::Duration::from_millis(500);
+        
+        for attempt in 0..max_retries {
+            match self.provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(r)) => {
+                    // Receipt 받으면 즉시 revert 확인하고 재시도 중단
+                    if !r.status() {
+                        return Err(MarketError::LockRevert(r.transaction_hash));
+                    }
+                    receipt = Some(r);
+                    break;
+                }
+                Ok(None) => {
+                    if attempt < max_retries - 1 {
+                        // 블록체인에 TX가 존재하는지 확인
+                        if let Ok(Some(_tx)) = self.provider.get_transaction_by_hash(tx_hash).await {
+                            tracing::debug!("TX {} exists in mempool/pending, waiting for receipt (attempt {}/{})", 
+                                          tx_hash, attempt + 1, max_retries);
+                        } else {
+                            tracing::warn!("TX {} not found in blockchain, attempt {}/{}", 
+                                         tx_hash, attempt + 1, max_retries);
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                    }
+                }
+                Err(e) => {
+                    if attempt == max_retries - 1 {
+                        return Err(MarketError::TxnConfirmationError(e.into()));
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
         }
+        
+        let receipt = receipt.ok_or_else(|| {
+            MarketError::TxnConfirmationError(anyhow::anyhow!("Transaction receipt not found after {} retries", max_retries))
+        })?;
 
         tracing::info!(
             "🚀 FAST LOCK SUCCESS: Request 0x{:x}, tx: {}, block: {}",

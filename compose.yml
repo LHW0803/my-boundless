@@ -341,6 +341,7 @@ services:
       <<: *broker-environment
       PRIVATE_KEY: ${PRIVATE_KEY}
       USE_HTTP: ${USE_HTTP:-false}
+      WEBSOCKET_URL: ${WEBSOCKET_URL}
       RPC_URL: ${RPC_URL}
       ORDER_STREAM_CLIENT_PING_MS: 30000
       ORDER_STREAM_CLIENT_TIMEOUT_SECS: 200
