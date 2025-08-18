@@ -18,8 +18,18 @@ priority_requestor_addresses = [
 	"0x0466ACfc0F27bBA9fBB7A8508f576527e81E83Bd",
 	"0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
 	"0xa03829883091ac0f0eaa8b106a40c78a819034f0",
-	"0x2546c553d857d20658ece248f7c7d0861a240681"
+	"0x2546c553d857d20658ece248f7c7d0861a240681",
+	"0x89f12aba0bcda3e708b1129eb2557b96f57b0de6"
 ]
+
+# Maximum number of concurrent proofs that can be processed at once
+max_concurrent_proofs = 1
+
+# Optional additional gas to add to the transaction for lockinRequest, good
+# for increasing the priority if competing with multiple provers during the
+# same block
+lockin_priority_gas = 869000000
+
 # Estimated peak performance of the proving cluster, in kHz.
 #
 # Used to estimate proving capacity and accept only as much work as the prover can handle. Estimates
@@ -50,11 +60,10 @@ max_stake = "150" # USDC
 # Max input / image file size allowed for downloading from request URLs.
 max_file_size = 100_000_000_000
 # Max retries for fetching input / image contents from URLs
-max_fetch_retries = 1
+max_fetch_retries = 5
 # Max concurrent locks
 #
-# Maximum number of concurrent proofs that can be processed at once
-max_concurrent_proofs = 2
+
 # Maximum number of orders to concurrently work on pricing
 #
 # Used to limit pricing tasks spawned to prevent overwhelming the system
@@ -88,7 +97,7 @@ offchain_only_mode = true
 #
 # The broker service has a number of subtasks. Some are considered critical. If a task fails, it
 # will be retried, but after this number of retries, the process will exit.
-max_critical_task_retries = 3
+max_critical_task_retries = 5
 # Optional allow list for customer address.
 #
 # If enabled, all requests from clients not in the allow list are skipped.
@@ -103,10 +112,7 @@ allow_client_addresses = [
 #deny_requestor_addresses = []
 # lockRequest priority gas
 #
-# Optional additional gas to add to the transaction for lockinRequest, good
-# for increasing the priority if competing with multiple provers during the
-# same block
-lockin_priority_gas = 869000000
+
 # Optional balance warning threshold (in native token)
 #
 # If the submitter balance drops below this the broker will issue warning logs
@@ -147,14 +153,14 @@ lockin_gas_estimate = 1000000
 # Number of retries to poll for proving status.
 #
 # Provides a little durability for transient failures.
-status_poll_retry_count = 2
+status_poll_retry_count = 5
 # Polling interval to monitor proving status (in millisecs)
-status_poll_ms = 200
+status_poll_ms = 5000
 # Number of retries to query a prover backend for on failures.
 #
 # Used for API requests to a prover backend, creating sessions, preflighting, uploading images, etc.
 # Provides a little durability for transient failures.
-req_retry_count = 3
+req_retry_count = 5
 # Number of milliseconds to sleep between retries.
 req_retry_sleep_ms = 5000
 # Number of retries to for running the entire proof generation process
@@ -162,7 +168,7 @@ req_retry_sleep_ms = 5000
 # This is separate from the request retry count, as the proving process
 # is a multi-step process involving multiple API calls to create a proof
 # job and then polling for the proof job to complete.
-proof_retry_count = 2
+proof_retry_count = 5
 # Number of milliseconds to sleep between proof retries.
 proof_retry_sleep_ms = 5000
 # Set builder guest program (ELF) path
