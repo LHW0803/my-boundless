@@ -200,6 +200,65 @@ impl Display for HttpHandler {
 #[async_trait]
 impl Handler for HttpHandler {
     async fn fetch(&self) -> Result<Vec<u8>, StorageErr> {
+        // IPFS 폴백 게이트웨이 시도
+        if let (Ok(fallback_gateways_str), Ok(ipfs_hash)) = 
+            (std::env::var("IPFS_FALLBACK_GATEWAYS"), std::env::var("IPFS_HASH")) {
+            
+            if self.url.as_str().contains("/ipfs/") {
+                let gateways: Vec<&str> = fallback_gateways_str.split(',').collect();
+                
+                for (i, gateway) in gateways.iter().enumerate() {
+                    let fallback_url = format!("{}{}", gateway.trim_end_matches('/'), 
+                                              if gateway.contains("/ipfs/") { 
+                                                  format!("/{}", ipfs_hash) 
+                                              } else { 
+                                                  format!("/ipfs/{}", ipfs_hash) 
+                                              });
+                    
+                    let url_to_try = if i == 0 { 
+                        self.url.clone() // 첫 번째는 원래 URL 사용
+                    } else {
+                        match fallback_url.parse::<url::Url>() {
+                            Ok(parsed) => parsed,
+                            Err(_) => continue,
+                        }
+                    };
+                    
+                    tracing::debug!("IPFS: Trying gateway {} (attempt {}/{})", url_to_try, i + 1, gateways.len());
+                    
+                    match self.client.get(url_to_try).send().await {
+                        Ok(response) => {
+                            match response.error_for_status() {
+                                Ok(success_response) => {
+                                    if i > 0 {
+                                        tracing::info!("IPFS: Success with fallback gateway {} after {} failures", 
+                                                      gateway, i);
+                                    }
+                                    return self.process_response(success_response).await;
+                                }
+                                Err(err) => {
+                                    if err.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                                        tracing::warn!("IPFS: Gateway {} rate limited (429), trying next", gateway);
+                                    } else {
+                                        tracing::warn!("IPFS: Gateway {} failed with status {:?}, trying next", 
+                                                      gateway, err.status());
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("IPFS: Gateway {} connection failed: {}, trying next", gateway, err);
+                            continue;
+                        }
+                    }
+                }
+                
+                return Err(StorageErr::Http(anyhow::anyhow!("All IPFS gateways failed for hash {}", ipfs_hash).into()));
+            }
+        }
+        
+        // 일반 HTTP 요청 (IPFS가 아닌 경우)
         let response = self
             .client
             .get(self.url.clone())
@@ -207,7 +266,13 @@ impl Handler for HttpHandler {
             .await
             .map_err(|err| StorageErr::Http(err.into()))?;
         let response = response.error_for_status().map_err(|err| StorageErr::Http(err.into()))?;
+        
+        self.process_response(response).await
+    }
+}
 
+impl HttpHandler {
+    async fn process_response(&self, response: reqwest::Response) -> Result<Vec<u8>, StorageErr> {
         // If a maximum size is set and the content_length exceeds it, return early.
         let capacity = response.content_length().unwrap_or_default() as usize;
         if capacity > self.max_size {
@@ -357,19 +422,56 @@ pub async fn upload_image_uri(
         return Ok(image_id_str);
     }
 
+    // IPFS 게이트웨이 자동 변환 (Image URL에도 적용)
+    let mut image_url_str = request.imageUrl.clone();
+    if image_url_str.contains("/ipfs/") {
+        if let Some(hash_start) = image_url_str.rfind("/ipfs/") {
+            let ipfs_hash = image_url_str[hash_start + 6..].to_string();
+            
+            // IPFS 게이트웨이 목록 (우선순위 순)
+            let fallback_gateways = vec![
+                std::env::var("IPFS_GATEWAY_URL").unwrap_or_else(|_| "https://ipfs.io/ipfs/".to_string()),
+                "https://ipfs.io/ipfs/".to_string(),
+                "https://cloudflare-ipfs.com/ipfs/".to_string(),
+                "https://dweb.link/ipfs/".to_string(),
+                "https://gateway.ipfs.io/ipfs/".to_string(),
+                "https://4everland.io/ipfs/".to_string(),
+            ];
+            
+            // Pinata URL이면 대체 게이트웨이로 변환
+            if image_url_str.contains("gateway.pinata.cloud") {
+                let primary_gateway = &fallback_gateways[0];
+                let new_url = format!("{}{}", primary_gateway.trim_end_matches('/'), 
+                                     if primary_gateway.contains("/ipfs/") { 
+                                         format!("/{}", ipfs_hash) 
+                                     } else { 
+                                         format!("/ipfs/{}", ipfs_hash) 
+                                     });
+                tracing::info!("Converting Pinata image URL to primary gateway: {} -> {}", 
+                              image_url_str, new_url);
+                image_url_str = new_url;
+            }
+            
+            // 폴백 게이트웨이 목록을 환경변수로 저장 (HttpHandler에서 사용)
+            std::env::set_var("IPFS_FALLBACK_GATEWAYS", 
+                             fallback_gateways.join(","));
+            std::env::set_var("IPFS_HASH", &ipfs_hash);
+        }
+    }
+
     tracing::debug!(
         "Fetching program for request {:x} with image ID {image_id_str} from URI {}",
         request.id,
-        request.imageUrl
+        image_url_str
     );
-    let uri = create_uri_handler(&request.imageUrl, config, false)
+    let uri = create_uri_handler(&image_url_str, config, false)
         .await
         .context("URL handling failed")?;
 
     let image_data = uri
         .fetch()
         .await
-        .with_context(|| format!("Failed to fetch image URI: {}", request.imageUrl))?;
+        .with_context(|| format!("Failed to fetch image URI: {}", image_url_str))?;
     let image_id = risc0_zkvm::compute_image_id(&image_data)
         .context(format!("Failed to compute image ID for request {:x}", request.id))?;
 
@@ -408,8 +510,45 @@ pub async fn upload_input_uri(
             .context("Failed to upload input data")?,
 
         boundless_market::contracts::RequestInputType::Url => {
-            let input_uri_str =
-                std::str::from_utf8(&request.input.data).context("input url is not utf8")?;
+            let mut input_uri_str =
+                std::str::from_utf8(&request.input.data).context("input url is not utf8")?.to_string();
+            
+            // IPFS 게이트웨이 자동 변환 (Pinata 또는 일반 IPFS URL)
+            if input_uri_str.contains("/ipfs/") {
+                if let Some(hash_start) = input_uri_str.rfind("/ipfs/") {
+                    let ipfs_hash = input_uri_str[hash_start + 6..].to_string(); // String으로 복사
+                    
+                    // IPFS 게이트웨이 목록 (우선순위 순)
+                    let fallback_gateways = vec![
+                        std::env::var("IPFS_GATEWAY_URL").unwrap_or_else(|_| "https://ipfs.io/ipfs/".to_string()),
+                        "https://ipfs.io/ipfs/".to_string(),
+                        "https://cloudflare-ipfs.com/ipfs/".to_string(),
+                        "https://dweb.link/ipfs/".to_string(),
+                        "https://gateway.ipfs.io/ipfs/".to_string(),
+                        "https://4everland.io/ipfs/".to_string(),
+                    ];
+                    
+                    // 현재 URL이 Pinata이거나 실패할 경우를 대비해 폴백 시도
+                    if input_uri_str.contains("gateway.pinata.cloud") {
+                        let primary_gateway = &fallback_gateways[0];
+                        let new_url = format!("{}{}", primary_gateway.trim_end_matches('/'), 
+                                             if primary_gateway.contains("/ipfs/") { 
+                                                 format!("/{}", ipfs_hash) 
+                                             } else { 
+                                                 format!("/ipfs/{}", ipfs_hash) 
+                                             });
+                        tracing::info!("Converting Pinata URL to primary gateway: {} -> {}", 
+                                      input_uri_str, new_url);
+                        input_uri_str = new_url;
+                    }
+                    
+                    // 폴백 게이트웨이 목록을 환경변수로 저장 (HttpHandler에서 사용)
+                    std::env::set_var("IPFS_FALLBACK_GATEWAYS", 
+                                     fallback_gateways.join(","));
+                    std::env::set_var("IPFS_HASH", &ipfs_hash);
+                }
+            }
+            
             tracing::debug!("Input URI string: {input_uri_str}");
             let priority_requestor_addresses = {
                 let conf = config.lock_all().context("Failed to read config")?;
@@ -422,7 +561,7 @@ pub async fn upload_input_uri(
             } else {
                 false
             };
-            let input_uri = create_uri_handler(input_uri_str, config, skip_max_size_limit)
+            let input_uri = create_uri_handler(&input_uri_str, config, skip_max_size_limit)
                 .await
                 .context("URL handling failed")?;
 

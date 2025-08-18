@@ -697,7 +697,7 @@ where
             config.market.allow_client_addresses.clone()
         };
         
-        // Only check whitelist - all other validations removed
+        // Check whitelist
         if let Some(allow_addresses) = allowed_addresses_opt {
             let client_addr = order.request.client_address();
             if !allow_addresses.contains(&client_addr) {
@@ -709,6 +709,24 @@ where
             tracing::debug!(
                 "Offchain: {order_id} from {client_addr} - whitelisted"
             );
+        }
+        
+        // Check minimum lock timeout (configurable via environment variable, default 10 minutes = 600 seconds)
+        let min_lock_duration_secs: u64 = std::env::var("MIN_LOCK_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600);
+            
+        let bidding_start = order.request.offer.biddingStart;
+        let lock_timeout = order.request.offer.lockTimeout as u64;
+        let _lock_expiry = bidding_start + lock_timeout;
+        
+        if lock_timeout < min_lock_duration_secs {
+            tracing::debug!(
+                "Offchain: Skipping {order_id} - lock timeout ({} seconds) is less than minimum {} seconds",
+                lock_timeout, min_lock_duration_secs
+            );
+            return Ok(OrderPricingOutcome::Skip);
         }
         
         // Use mock IDs for fast processing - real upload happens in proving stage
