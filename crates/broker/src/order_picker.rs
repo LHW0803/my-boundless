@@ -717,6 +717,12 @@ where
             .parse()
             .unwrap_or(600);
             
+        // Check maximum lock timeout (configurable via environment variable, default 1 hour = 3600 seconds)
+        let max_lock_duration_secs: u64 = std::env::var("MAX_LOCK_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .unwrap_or(3600);
+            
         let bidding_start = order.request.offer.biddingStart;
         let lock_timeout = order.request.offer.lockTimeout as u64;
         let _lock_expiry = bidding_start + lock_timeout;
@@ -725,6 +731,14 @@ where
             tracing::debug!(
                 "Offchain: Skipping {order_id} - lock timeout ({} seconds) is less than minimum {} seconds",
                 lock_timeout, min_lock_duration_secs
+            );
+            return Ok(OrderPricingOutcome::Skip);
+        }
+        
+        if lock_timeout > max_lock_duration_secs {
+            tracing::debug!(
+                "Offchain: Skipping {order_id} - lock timeout ({} seconds) is greater than maximum {} seconds",
+                lock_timeout, max_lock_duration_secs
             );
             return Ok(OrderPricingOutcome::Skip);
         }
