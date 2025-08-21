@@ -22,13 +22,33 @@ priority_requestor_addresses = [
 	"0x89f12aba0bcda3e708b1129eb2557b96f57b0de6"
 ]
 
+# Mempool-only mode
+#
+# When enabled, only processes orders detected in mempool for maximum speed.
+# Disables blockchain event monitoring, order stream, and other non-critical services.
+# WARNING: This mode may miss some orders but provides fastest lock times.
+mempool_only_mode = false
+# Offchain-only mode
+#
+# When enabled, only processes orders from the offchain order stream.
+# Disables blockchain event monitoring and mempool monitoring.
+# WARNING: This mode requires a valid order stream URL and may have different latency characteristics.
+offchain_only_mode = true
+
+# If enabled, all requests from clients not in the allow list are skipped.
+allow_client_addresses = [
+    "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
+	"0xa03829883091ac0f0eaa8b106a40c78a819034f0",
+	"0x2546c553d857d20658ece248f7c7d0861a240681"
+]
+
 # Maximum number of concurrent proofs that can be processed at once
 max_concurrent_proofs = 1
 
 # Optional additional gas to add to the transaction for lockinRequest, good
 # for increasing the priority if competing with multiple provers during the
 # same block
-lockin_priority_gas = 869000000
+lockin_priority_gas = 269000000
 
 # Estimated peak performance of the proving cluster, in kHz.
 #
@@ -81,18 +101,7 @@ order_pricing_priority = "observation_time"
 # - "random": Process orders in random order to distribute competition among provers (default)
 # - "shortest_expiry": Process orders by shortest expiry first (lock expiry for lock-and-fulfill orders, request expiry for others)
 #order_commitment_priority = "random"
-# Mempool-only mode
-#
-# When enabled, only processes orders detected in mempool for maximum speed.
-# Disables blockchain event monitoring, order stream, and other non-critical services.
-# WARNING: This mode may miss some orders but provides fastest lock times.
-mempool_only_mode = false
-# Offchain-only mode
-#
-# When enabled, only processes orders from the offchain order stream.
-# Disables blockchain event monitoring and mempool monitoring.
-# WARNING: This mode requires a valid order stream URL and may have different latency characteristics.
-offchain_only_mode = true
+
 # Max critical task retries on recoverable failures.
 #
 # The broker service has a number of subtasks. Some are considered critical. If a task fails, it
@@ -100,12 +109,7 @@ offchain_only_mode = true
 max_critical_task_retries = 5
 # Optional allow list for customer address.
 #
-# If enabled, all requests from clients not in the allow list are skipped.
-allow_client_addresses = [
-    "0xc2db89b2bd434ceac6c74fbc0b2ad3a280e66db0",
-	"0xa03829883091ac0f0eaa8b106a40c78a819034f0",
-	"0x2546c553d857d20658ece248f7c7d0861a240681"
-]
+
 # Optional deny list for requestor address.
 #
 # If enabled, all requests from clients in the deny list are skipped.
